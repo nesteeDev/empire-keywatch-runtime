@@ -94,7 +94,7 @@ async function aiMatch(text) {
   if (!msgEmbedding) return null
 
   const similarity = cosineSimilarity(promptEmbedding, msgEmbedding)
-  const threshold = 0.45 // tunable, 0.4-0.6 range
+  const threshold = parseFloat(process.env.AI_THRESHOLD || '0.55') // tunable
   const isMatch = similarity >= threshold
 
   console.log('[AI]', isMatch ? 'MATCH' : 'no match', 'score=' + similarity.toFixed(3), ':', text.slice(0, 50))
