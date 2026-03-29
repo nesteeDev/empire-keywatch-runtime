@@ -201,12 +201,32 @@ client.on('update', async (update) => {
 
 client.on('error', (e) => console.error('TDLib error:', e))
 
-// Login
+// Login with orchestrator-based flow (no stdin)
+async function waitForCommand(cmdName) {
+  console.log('[LOGIN] waiting for command:', cmdName)
+  await orchPost('/api/login-status', { status: cmdName === 'login_phone' ? 'need_phone' : cmdName === 'login_code' ? 'need_code' : 'need_password' })
+  while (true) {
+    const data = await orchGet('/api/pull')
+    if (data) {
+      for (const cmd of data.commands) {
+        if (cmd.command === cmdName) return cmd.payload
+      }
+    }
+    await new Promise(r => setTimeout(r, 3000))
+  }
+}
+
 try {
-  await client.login()
+  await client.login(() => ({
+    getPhoneNumber: async () => await waitForCommand('login_phone'),
+    getAuthCode: async () => await waitForCommand('login_code'),
+    getPassword: async () => await waitForCommand('login_password'),
+  }))
   console.log('Logged in!')
+  await orchPost('/api/login-status', { status: 'logged_in' })
 } catch (e) {
   console.error('Login failed:', e.message)
+  await orchPost('/api/login-status', { status: 'error', message: e.message })
   process.exit(1)
 }
 
