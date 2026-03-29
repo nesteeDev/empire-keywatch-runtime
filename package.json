@@ -1,0 +1,14 @@
+{
+  "name": "@empire-keywatch/runtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/runtime.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "prebuilt-tdlib": "^0.1.3",
+    "tdl": "^8.0.0"
+  }
+}
