@@ -12,8 +12,8 @@ console.log('Starting KeyWatch Runtime...')
 console.log('Orchestrator:', ORCH)
 
 const client = tdl.createClient({
-  apiId: parseInt(process.env.TG_API_ID || '30388596'),
-  apiHash: process.env.TG_API_HASH || 'REDACTED',
+  apiId: parseInt(process.env.TG_API_ID),
+  apiHash: process.env.TG_API_HASH,
   databaseDirectory: DATA + '/tdlib_db',
   filesDirectory: DATA + '/tdlib_files',
 })
