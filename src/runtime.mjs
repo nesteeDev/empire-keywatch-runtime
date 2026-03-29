@@ -104,7 +104,15 @@ async function aiMatch(text) {
 // Send chat list to orchestrator
 async function syncChatList() {
   try {
-    const chats = await client.invoke({ _: 'getChats', chat_list: { _: 'chatListMain' }, limit: 200 })
+    // Load all chats from Telegram server first
+    try {
+      for (let i = 0; i < 10; i++) {
+        await client.invoke({ _: 'loadChats', chat_list: { _: 'chatListMain' }, limit: 100 })
+      }
+    } catch (e) {
+      // loadChats throws when no more chats to load — that's expected
+    }
+    const chats = await client.invoke({ _: 'getChats', chat_list: { _: 'chatListMain' }, limit: 500 })
     const result = []
     for (const chatId of chats.chat_ids) {
       try {
