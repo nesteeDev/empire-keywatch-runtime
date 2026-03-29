@@ -282,13 +282,6 @@ async function pullLoop() {
     for (const cmd of data.commands) {
       console.log('[CMD]', cmd.command, cmd.payload)
       try {
-        if (cmd.command === 'add_group') {
-          const username = cmd.payload.replace(/^@/, '')
-          const chat = await client.invoke({ _: 'searchPublicChat', username })
-          await client.invoke({ _: 'joinChat', chat_id: chat.id })
-          monitoredChats.set(String(chat.id), username)
-          console.log('[JOINED]', username, 'id:', chat.id)
-        }
         if (cmd.command === 'add_group_by_id') {
           const chatId = cmd.payload
           monitoredChats.set(chatId, chatId)
