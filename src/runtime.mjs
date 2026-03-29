@@ -260,6 +260,9 @@ async function pullLoop() {
       process.env.AI_PROMPT = data.aiPrompt
       await updatePromptEmbedding()
     }
+    if (data.aiThreshold) {
+      process.env.AI_THRESHOLD = String(data.aiThreshold)
+    }
 
     // Sync monitored groups from orchestrator
     if (data.groups && monitoredChats.size === 0) {
