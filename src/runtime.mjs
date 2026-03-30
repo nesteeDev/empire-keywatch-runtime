@@ -226,11 +226,11 @@ client.on('update', async (update) => {
   let matched = null
 
   if (filterMode === 'keywords') {
-    // Try embeddings first, fallback to exact match
     if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
+      // Embeddings available — use only embeddings
       matched = await embeddingKeywordMatch(text)
-    }
-    if (!matched) {
+    } else {
+      // No CF or quota exceeded — exact match only
       const exact = exactKeywordMatch(text)
       if (exact) matched = exact + ' [exact]'
     }
@@ -238,11 +238,10 @@ client.on('update', async (update) => {
     // Haiku only
     matched = await haikuMatch(text)
   } else if (filterMode === 'hybrid') {
-    // Keywords first (embeddings or exact), then Haiku confirms
+    // Keywords first, then Haiku confirms
     if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
       matched = await embeddingKeywordMatch(text)
-    }
-    if (!matched) {
+    } else {
       const exact = exactKeywordMatch(text)
       if (exact) matched = exact + ' [exact]'
     }
