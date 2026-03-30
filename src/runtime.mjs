@@ -231,7 +231,8 @@ client.on('update', async (update) => {
       matched = await embeddingKeywordMatch(text)
     }
     if (!matched) {
-      matched = exactKeywordMatch(text)
+      const exact = exactKeywordMatch(text)
+      if (exact) matched = exact + ' [exact]'
     }
   } else if (filterMode === 'prompt') {
     // Haiku only
@@ -242,7 +243,8 @@ client.on('update', async (update) => {
       matched = await embeddingKeywordMatch(text)
     }
     if (!matched) {
-      matched = exactKeywordMatch(text)
+      const exact = exactKeywordMatch(text)
+      if (exact) matched = exact + ' [exact]'
     }
     if (matched) {
       // Haiku double-checks
