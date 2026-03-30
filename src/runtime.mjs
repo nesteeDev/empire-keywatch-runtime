@@ -173,6 +173,7 @@ function exactKeywordMatch(text) {
 
 // --- Anthropic Haiku (for prompt mode) ---
 
+// Returns: 'AI: prompt match' | 'no' | null (null = error/unavailable)
 async function haikuMatch(text) {
   if (!anthropicKey || !promptText) return null
 
@@ -196,17 +197,17 @@ async function haikuMatch(text) {
     if (!res.ok) {
       const err = await res.text()
       console.error('[HAIKU] error:', res.status, err.slice(0, 100))
-      return null
+      return null // error — caller decides what to do
     }
 
     const data = await res.json()
     const answer = data.content?.[0]?.text?.trim().toUpperCase() || ''
     const isMatch = answer.startsWith('YES')
     console.log('[HAIKU]', isMatch ? 'MATCH' : 'no match', ':', text.slice(0, 50), '->', answer)
-    return isMatch ? 'AI: prompt match' : null
+    return isMatch ? 'AI: prompt match' : 'no'
   } catch (e) {
     console.error('[HAIKU] error:', e.message)
-    return null
+    return null // error
   }
 }
 
@@ -248,7 +249,13 @@ client.on('update', async (update) => {
     if (matched) {
       // Haiku double-checks
       const haikuResult = await haikuMatch(text)
-      if (!haikuResult) matched = null // keyword matched but Haiku rejected
+      if (haikuResult === 'no') {
+        matched = null // Haiku explicitly rejected
+      } else if (haikuResult === null) {
+        // Haiku error/unavailable — keep keyword match, don't block
+        console.log('[HYBRID] Haiku unavailable, passing keyword match through')
+      }
+      // haikuResult === 'AI: prompt match' — confirmed
     }
   }
 
