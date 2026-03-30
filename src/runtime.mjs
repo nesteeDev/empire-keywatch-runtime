@@ -369,8 +369,9 @@ console.log('[heartbeat] sent')
 async function pullLoop() {
   const data = await orchGet('/api/pull')
   if (data) {
-    // Auto-update: restart if new version available
-    if (data.runtimeVersion && data.runtimeVersion !== RUNTIME_VERSION) {
+    // Auto-update: restart if new version available (only for Docker deployments)
+    const isDocker = process.env.RAILWAY_DEPLOYMENT_ID && !process.env.RAILWAY_GIT_COMMIT_SHA
+    if (isDocker && data.runtimeVersion && data.runtimeVersion !== RUNTIME_VERSION) {
       console.log('[UPDATE] New version available:', data.runtimeVersion, '(current:', RUNTIME_VERSION + ')')
       console.log('[UPDATE] Restarting to update...')
       await orchPost('/api/login-status', {
@@ -378,7 +379,10 @@ async function pullLoop() {
         version: data.runtimeVersion,
         changelog: data.changelog || '',
       })
-      process.exit(0) // Railway/systemd will restart with new image/code
+      process.exit(0) // Railway will restart with new Docker image
+    } else if (data.runtimeVersion && data.runtimeVersion !== RUNTIME_VERSION) {
+      // Git deployment — just log, don't restart
+      console.log('[UPDATE] Version mismatch:', data.runtimeVersion, 'vs', RUNTIME_VERSION, '(git deploy, skipping restart)')
     }
 
     // Sync config
