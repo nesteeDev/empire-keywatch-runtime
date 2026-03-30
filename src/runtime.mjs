@@ -137,7 +137,7 @@ async function embeddingKeywordMatch(text) {
     }
   }
 
-  if (bestScore >= threshold) {
+  if (bestScore >= threshold && bestKeyword) {
     console.log('[EMB] MATCH', bestKeyword, 'score=' + bestScore.toFixed(3), ':', text.slice(0, 50))
     return bestKeyword + ' (' + bestScore.toFixed(2) + ')'
   }
