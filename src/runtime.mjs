@@ -18,6 +18,8 @@ const client = tdl.createClient({
   filesDirectory: DATA + '/tdlib_files',
 })
 
+const RUNTIME_VERSION = '1.1.0'
+
 let keywords = []
 let monitoredChats = new Map() // chatId -> title
 let filterMode = 'keywords' // keywords | prompt | hybrid
@@ -367,6 +369,13 @@ console.log('[heartbeat] sent')
 async function pullLoop() {
   const data = await orchGet('/api/pull')
   if (data) {
+    // Auto-update: restart if new version available
+    if (data.runtimeVersion && data.runtimeVersion !== RUNTIME_VERSION) {
+      console.log('[UPDATE] New version available:', data.runtimeVersion, '(current:', RUNTIME_VERSION + ')')
+      console.log('[UPDATE] Restarting to update...')
+      process.exit(0) // Railway/systemd will restart with new image/code
+    }
+
     // Sync config
     if (data.filterMode) filterMode = data.filterMode
     if (data.aiThreshold) process.env.AI_THRESHOLD = String(data.aiThreshold)
@@ -458,7 +467,8 @@ async function pullLoop() {
       } catch (e) { console.error('[CMD ERROR]', e.message) }
     }
   }
-  setTimeout(pullLoop, 10000)
+  const interval = (data?.config?.pullInterval || 120) * 1000
+  setTimeout(pullLoop, interval)
 }
 
 // Initial keyword embeddings
