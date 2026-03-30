@@ -18,7 +18,7 @@ const client = tdl.createClient({
   filesDirectory: DATA + '/tdlib_files',
 })
 
-const RUNTIME_VERSION = '1.1.0'
+const RUNTIME_VERSION = '1.2.0'
 
 let keywords = []
 let monitoredChats = new Map() // chatId -> title
