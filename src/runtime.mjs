@@ -20,6 +20,11 @@ const client = tdl.createClient({
 
 let keywords = []
 let monitoredChats = new Map() // chatId -> title
+let filterMode = 'keywords' // keywords | prompt | hybrid
+let promptText = ''
+let anthropicKey = ''
+
+// --- Orchestrator communication ---
 
 async function orchPost(path, body) {
   try {
@@ -40,32 +45,38 @@ async function orchGet(path) {
   } catch (e) { console.error('orch error:', e.message); return null }
 }
 
-// AI matching via Cloudflare Workers AI embeddings (bge-m3)
-const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID || ''
-const CF_API_TOKEN = process.env.CF_API_TOKEN || ''
-let aiPromptText = process.env.AI_PROMPT || ''
-let filterMode = process.env.FILTER_MODE || 'keywords'
-let promptEmbedding = null // cached embedding of the prompt
+// --- Cloudflare Workers AI embeddings (for keywords mode) ---
+
+let cfAccountId = process.env.CF_ACCOUNT_ID || ''
+let cfApiToken = process.env.CF_API_TOKEN || ''
+let keywordEmbeddings = new Map() // keyword -> embedding vector
+let embeddingsFailed = false // fallback flag when CF quota exceeded
 
 async function getEmbedding(text) {
-  const res = await fetch(
-    'https://api.cloudflare.com/client/v4/accounts/' + CF_ACCOUNT_ID + '/ai/run/@cf/baai/bge-m3',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + CF_API_TOKEN,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ text: [text] }),
+  if (!cfAccountId || !cfApiToken) return null
+  try {
+    const res = await fetch(
+      'https://api.cloudflare.com/client/v4/accounts/' + cfAccountId + '/ai/run/@cf/baai/bge-m3',
+      {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + cfApiToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: [text] }),
+      }
+    )
+    if (!res.ok) {
+      const err = await res.text()
+      if (err.includes('rate') || err.includes('quota') || err.includes('limit')) {
+        console.log('[EMB] CF quota exceeded, falling back to exact match')
+        embeddingsFailed = true
+      }
+      return null
     }
-  )
-  if (!res.ok) {
-    const err = await res.text()
-    console.error('[AI] embedding error:', res.status, err.slice(0, 100))
+    const data = await res.json()
+    return data.result?.data?.[0] || null
+  } catch (e) {
+    console.error('[EMB] error:', e.message)
     return null
   }
-  const data = await res.json()
-  return data.result?.data?.[0] || null
 }
 
 function cosineSimilarity(a, b) {
@@ -79,72 +90,108 @@ function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB))
 }
 
-async function updatePromptEmbedding() {
-  if (!CF_ACCOUNT_ID || !CF_API_TOKEN || !aiPromptText) return
-  console.log('[AI] computing prompt embedding for:', aiPromptText.slice(0, 50))
-  promptEmbedding = await getEmbedding(aiPromptText)
-  if (promptEmbedding) console.log('[AI] prompt embedding ready, dim:', promptEmbedding.length)
-  else console.log('[AI] failed to compute prompt embedding')
+// Cache embeddings for each keyword individually
+async function updateKeywordEmbeddings() {
+  if (!cfAccountId || !cfApiToken || keywords.length === 0) return
+  embeddingsFailed = false
+  console.log('[EMB] computing embeddings for', keywords.length, 'keywords...')
+
+  let cached = 0
+  for (const kw of keywords) {
+    if (keywordEmbeddings.has(kw)) { cached++; continue }
+    const emb = await getEmbedding(kw)
+    if (emb) {
+      keywordEmbeddings.set(kw, emb)
+    } else if (embeddingsFailed) {
+      break // stop if quota exceeded
+    }
+  }
+
+  // Remove old keywords no longer in list
+  for (const [k] of keywordEmbeddings) {
+    if (!keywords.includes(k)) keywordEmbeddings.delete(k)
+  }
+
+  console.log('[EMB]', keywordEmbeddings.size, 'embeddings cached,', cached, 'reused')
 }
 
-async function aiMatch(text) {
-  if (!CF_ACCOUNT_ID || !CF_API_TOKEN || !promptEmbedding) return null
+// Match message against keyword embeddings
+async function embeddingKeywordMatch(text) {
+  if (embeddingsFailed || keywordEmbeddings.size === 0) return null
 
-  const msgEmbedding = await getEmbedding(text)
-  if (!msgEmbedding) return null
+  const msgEmb = await getEmbedding(text)
+  if (!msgEmb) return null
 
-  const similarity = cosineSimilarity(promptEmbedding, msgEmbedding)
-  const threshold = parseFloat(process.env.AI_THRESHOLD || '0.55') // tunable
-  const isMatch = similarity >= threshold
+  const threshold = parseFloat(process.env.AI_THRESHOLD || '0.55')
+  let bestScore = 0
+  let bestKeyword = null
 
-  console.log('[AI]', isMatch ? 'MATCH' : 'no match', 'score=' + similarity.toFixed(3), ':', text.slice(0, 50))
-  return isMatch ? 'AI: ' + similarity.toFixed(2) : null
+  for (const [kw, kwEmb] of keywordEmbeddings) {
+    const score = cosineSimilarity(msgEmb, kwEmb)
+    if (score > bestScore) {
+      bestScore = score
+      bestKeyword = kw
+    }
+  }
+
+  if (bestScore >= threshold) {
+    console.log('[EMB] MATCH', bestKeyword, 'score=' + bestScore.toFixed(3), ':', text.slice(0, 50))
+    return bestKeyword + ' (' + bestScore.toFixed(2) + ')'
+  }
+
+  return null
 }
 
-// Send chat list to orchestrator
-async function syncChatList() {
+// Exact keyword match (fallback when no CF or quota exceeded)
+function exactKeywordMatch(text) {
+  const lower = text.toLowerCase()
+  for (const kw of keywords) {
+    if (lower.includes(kw.toLowerCase())) return kw
+  }
+  return null
+}
+
+// --- Anthropic Haiku (for prompt mode) ---
+
+async function haikuMatch(text) {
+  if (!anthropicKey || !promptText) return null
+
   try {
-    // Load all chats from Telegram server first
-    try {
-      for (let i = 0; i < 10; i++) {
-        await client.invoke({ _: 'loadChats', chat_list: { _: 'chatListMain' }, limit: 100 })
-      }
-    } catch (e) {
-      // loadChats throws when no more chats to load — that's expected
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': anthropicKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 5,
+        messages: [
+          { role: 'user', content: `Does this message match the following criteria? Answer ONLY "YES" or "NO".\n\nCriteria: ${promptText}\n\nMessage: ${text}` }
+        ],
+      }),
+    })
+
+    if (!res.ok) {
+      const err = await res.text()
+      console.error('[HAIKU] error:', res.status, err.slice(0, 100))
+      return null
     }
-    const chats = await client.invoke({ _: 'getChats', chat_list: { _: 'chatListMain' }, limit: 500 })
-    const result = []
-    for (const chatId of chats.chat_ids) {
-      try {
-        const chat = await client.invoke({ _: 'getChat', chat_id: chatId })
-        // Only groups and supergroups
-        if (chat.type?._ === 'chatTypeSupergroup' || chat.type?._ === 'chatTypeBasicGroup') {
-          let memberCount = 0
-          if (chat.type?._ === 'chatTypeSupergroup') {
-            try {
-              const sg = await client.invoke({ _: 'getSupergroup', supergroup_id: chat.type.supergroup_id })
-              memberCount = sg.member_count || 0
-            } catch {}
-          }
-          result.push({
-            id: String(chatId),
-            title: chat.title || String(chatId),
-            type: chat.type?._ === 'chatTypeSupergroup' ? (chat.type.is_channel ? 'channel' : 'group') : 'group',
-            memberCount,
-          })
-        }
-      } catch {}
-    }
-    console.log('[SYNC] found', result.length, 'groups')
-    await orchPost('/api/chats', result)
-    return result
+
+    const data = await res.json()
+    const answer = data.content?.[0]?.text?.trim().toUpperCase() || ''
+    const isMatch = answer.startsWith('YES')
+    console.log('[HAIKU]', isMatch ? 'MATCH' : 'no match', ':', text.slice(0, 50), '->', answer)
+    return isMatch ? 'AI: prompt match' : null
   } catch (e) {
-    console.error('syncChatList error:', e.message)
-    return []
+    console.error('[HAIKU] error:', e.message)
+    return null
   }
 }
 
-// Message handler
+// --- Combined message handler ---
+
 client.on('update', async (update) => {
   if (update._ !== 'updateNewMessage') return
   const msg = update.message
@@ -157,27 +204,37 @@ client.on('update', async (update) => {
   if (!monitoredChats.has(chatId)) return
 
   let matched = null
-  
-  if (filterMode === 'keywords' || filterMode === 'hybrid') {
-    const lower = text.toLowerCase()
-    for (const kw of keywords) {
-      if (lower.includes(kw.toLowerCase())) { matched = kw; break }
+
+  if (filterMode === 'keywords') {
+    // Try embeddings first, fallback to exact match
+    if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
+      matched = await embeddingKeywordMatch(text)
+    }
+    if (!matched) {
+      matched = exactKeywordMatch(text)
+    }
+  } else if (filterMode === 'prompt') {
+    // Haiku only
+    matched = await haikuMatch(text)
+  } else if (filterMode === 'hybrid') {
+    // Keywords first (embeddings or exact), then Haiku confirms
+    if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
+      matched = await embeddingKeywordMatch(text)
+    }
+    if (!matched) {
+      matched = exactKeywordMatch(text)
+    }
+    if (matched) {
+      // Haiku double-checks
+      const haikuResult = await haikuMatch(text)
+      if (!haikuResult) matched = null // keyword matched but Haiku rejected
     }
   }
-  
-  if (filterMode === 'ai' || (filterMode === 'hybrid' && matched)) {
-    const aiResult = await aiMatch(text)
-    if (filterMode === 'ai') {
-      matched = aiResult
-    } else if (filterMode === 'hybrid' && !aiResult) {
-      matched = null // keyword matched but AI rejected
-    }
-  }
-  
+
   if (!matched) return
 
   const groupTitle = monitoredChats.get(chatId) || chatId
-  console.log('[MATCH]', groupTitle, ':', text.slice(0, 80), '| kw:', matched)
+  console.log('[MATCH]', groupTitle, ':', text.slice(0, 80), '| by:', matched)
 
   let senderName = '', senderUsername = '', senderId = 0
   try {
@@ -209,10 +266,12 @@ client.on('update', async (update) => {
 
 client.on('error', (e) => console.error('TDLib error:', e))
 
-// Login with orchestrator-based flow (no stdin)
+// --- Login ---
+
 async function waitForCommand(cmdName) {
   console.log('[LOGIN] waiting for command:', cmdName)
-  await orchPost('/api/login-status', { status: cmdName === 'login_phone' ? 'need_phone' : cmdName === 'login_code' ? 'need_code' : 'need_password' })
+  const statusMap = { login_phone: 'need_phone', login_code: 'need_code', login_password: 'need_password' }
+  await orchPost('/api/login-status', { status: statusMap[cmdName] || cmdName })
   while (true) {
     const data = await orchGet('/api/pull')
     if (data) {
@@ -238,33 +297,80 @@ try {
   process.exit(1)
 }
 
-// Sync chat list on startup
+// --- Sync chat list ---
+
+async function syncChatList() {
+  try {
+    try {
+      for (let i = 0; i < 10; i++) {
+        await client.invoke({ _: 'loadChats', chat_list: { _: 'chatListMain' }, limit: 100 })
+      }
+    } catch {}
+    const chats = await client.invoke({ _: 'getChats', chat_list: { _: 'chatListMain' }, limit: 500 })
+    const result = []
+    for (const chatId of chats.chat_ids) {
+      try {
+        const chat = await client.invoke({ _: 'getChat', chat_id: chatId })
+        if (chat.type?._ === 'chatTypeSupergroup' || chat.type?._ === 'chatTypeBasicGroup') {
+          let memberCount = 0
+          if (chat.type?._ === 'chatTypeSupergroup') {
+            try {
+              const sg = await client.invoke({ _: 'getSupergroup', supergroup_id: chat.type.supergroup_id })
+              memberCount = sg.member_count || 0
+            } catch {}
+          }
+          result.push({
+            id: String(chatId),
+            title: chat.title || String(chatId),
+            type: chat.type?._ === 'chatTypeSupergroup' ? (chat.type.is_channel ? 'channel' : 'group') : 'group',
+            memberCount,
+          })
+        }
+      } catch {}
+    }
+    console.log('[SYNC] found', result.length, 'groups')
+    await orchPost('/api/chats', result)
+    return result
+  } catch (e) {
+    console.error('syncChatList error:', e.message)
+    return []
+  }
+}
+
 await syncChatList()
 
-// Compute prompt embedding if AI prompt is set
-if (aiPromptText) await updatePromptEmbedding()
+// --- Heartbeat ---
 
-// Heartbeat
 setInterval(() => orchPost('/api/heartbeat', {}), 120000)
 await orchPost('/api/heartbeat', {})
 console.log('[heartbeat] sent')
 
-// Pull loop
+// --- Pull loop ---
+
 async function pullLoop() {
   const data = await orchGet('/api/pull')
   if (data) {
-    if (data.keywords) keywords = data.keywords
+    // Sync config
     if (data.filterMode) filterMode = data.filterMode
-    if (data.aiPrompt && data.aiPrompt !== aiPromptText) {
-      aiPromptText = data.aiPrompt
-      process.env.AI_PROMPT = data.aiPrompt
-      await updatePromptEmbedding()
-    }
-    if (data.aiThreshold) {
-      process.env.AI_THRESHOLD = String(data.aiThreshold)
+    if (data.aiThreshold) process.env.AI_THRESHOLD = String(data.aiThreshold)
+    if (data.anthropicKey) anthropicKey = data.anthropicKey
+    if (data.aiPrompt !== undefined && data.aiPrompt !== promptText) {
+      promptText = data.aiPrompt
+      console.log('[PROMPT]', promptText.slice(0, 80))
     }
 
-    // Sync monitored groups from orchestrator
+    // Sync keywords + recompute embeddings if changed
+    if (data.keywords) {
+      const newKw = JSON.stringify(data.keywords)
+      const oldKw = JSON.stringify(keywords)
+      if (newKw !== oldKw) {
+        keywords = data.keywords
+        console.log('[KEYWORDS]', keywords.length, 'words')
+        await updateKeywordEmbeddings()
+      }
+    }
+
+    // Sync monitored groups
     if (data.groups && monitoredChats.size === 0) {
       for (const g of data.groups) {
         const chatId = g.id || ''
@@ -274,78 +380,72 @@ async function pullLoop() {
             const chat = await client.invoke({ _: 'getChat', chat_id: parseInt(chatId) })
             monitoredChats.set(chatId, chat.title || name || chatId)
             console.log('[RESTORED]', chat.title, 'id:', chatId)
-          } catch (e) {
+          } catch {
             monitoredChats.set(chatId, name || chatId)
-            console.log('[RESTORED by ID]', chatId)
           }
         }
       }
     }
 
+    // Process commands
     for (const cmd of data.commands) {
       console.log('[CMD]', cmd.command, cmd.payload)
       try {
         if (cmd.command === 'add_group_by_id') {
           const chatId = cmd.payload
-          monitoredChats.set(chatId, chatId)
-          // Get title
           try {
             const chat = await client.invoke({ _: 'getChat', chat_id: parseInt(chatId) })
             monitoredChats.set(chatId, chat.title || chatId)
-            console.log('[MONITORING]', chat.title, 'id:', chatId)
+            console.log('[MONITORING]', chat.title)
           } catch {
-            console.log('[MONITORING] id:', chatId)
-          }
-        }
-        if (cmd.command === 'remove_group') {
-          const username = cmd.payload.replace(/^@/, '')
-          for (const [id, name] of monitoredChats) {
-            if (name === username) { monitoredChats.delete(id); break }
+            monitoredChats.set(chatId, chatId)
           }
         }
         if (cmd.command === 'remove_group_by_id') {
           monitoredChats.delete(cmd.payload)
-          console.log('[UNMONITORING] id:', cmd.payload)
         }
         if (cmd.command === 'update_keywords') {
           keywords = cmd.payload.split(',').map(s => s.trim()).filter(Boolean)
           console.log('[KEYWORDS]', keywords)
-        }
-        if (cmd.command === 'list_chats') {
-          await syncChatList()
+          await updateKeywordEmbeddings()
         }
         if (cmd.command === 'update_mode') {
           filterMode = cmd.payload
           console.log('[MODE]', filterMode)
         }
         if (cmd.command === 'update_prompt') {
-          aiPromptText = cmd.payload
-          process.env.AI_PROMPT = cmd.payload
-          console.log('[PROMPT]', cmd.payload)
-          await updatePromptEmbedding()
+          promptText = cmd.payload
+          console.log('[PROMPT]', promptText.slice(0, 80))
+        }
+        if (cmd.command === 'update_threshold') {
+          process.env.AI_THRESHOLD = cmd.payload
+          console.log('[THRESHOLD]', cmd.payload)
         }
         if (cmd.command === 'set_cloudflare') {
           try {
             const cf = JSON.parse(cmd.payload)
-            process.env.CF_ACCOUNT_ID = cf.accountId
-            process.env.CF_API_TOKEN = cf.apiToken
+            cfAccountId = cf.accountId
+            cfApiToken = cf.apiToken
+            embeddingsFailed = false
             console.log('[CF] credentials updated')
+            await updateKeywordEmbeddings()
           } catch {}
         }
-        if (cmd.command === 'update_mode') {
-          filterMode = cmd.payload
-          console.log('[MODE]', filterMode)
+        if (cmd.command === 'set_anthropic') {
+          anthropicKey = cmd.payload
+          console.log('[ANTHROPIC] key updated')
         }
-        if (cmd.command === 'update_prompt') {
-          // Update AI_PROMPT dynamically
-          process.env.AI_PROMPT = cmd.payload
-          console.log('[PROMPT]', cmd.payload)
+        if (cmd.command === 'list_chats') {
+          await syncChatList()
         }
       } catch (e) { console.error('[CMD ERROR]', e.message) }
     }
   }
   setTimeout(pullLoop, 10000)
 }
+
+// Initial keyword embeddings
+await updateKeywordEmbeddings()
 
 console.log('Runtime ready. Pull loop starting...')
 pullLoop()
