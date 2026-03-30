@@ -197,6 +197,10 @@ async function haikuMatch(text) {
     if (!res.ok) {
       const err = await res.text()
       console.error('[HAIKU] error:', res.status, err.slice(0, 100))
+      if (res.status === 401) {
+        await orchPost('/api/login-status', { status: 'error', message: 'Anthropic API key is invalid. Check /setupai → Anthropic.' })
+        anthropicKey = '' // disable until fixed
+      }
       return null // error — caller decides what to do
     }
 
