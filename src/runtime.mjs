@@ -373,6 +373,11 @@ async function pullLoop() {
     if (data.runtimeVersion && data.runtimeVersion !== RUNTIME_VERSION) {
       console.log('[UPDATE] New version available:', data.runtimeVersion, '(current:', RUNTIME_VERSION + ')')
       console.log('[UPDATE] Restarting to update...')
+      await orchPost('/api/login-status', {
+        status: 'updated',
+        version: data.runtimeVersion,
+        changelog: data.changelog || '',
+      })
       process.exit(0) // Railway/systemd will restart with new image/code
     }
 
