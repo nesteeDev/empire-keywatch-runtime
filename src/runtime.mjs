@@ -25,6 +25,7 @@ let monitoredChats = new Map() // chatId -> title
 let filterMode = 'keywords' // keywords | prompt | hybrid
 let promptText = ''
 let anthropicKey = ''
+let aiThreshold = 0.55
 
 // --- Orchestrator communication ---
 
@@ -124,7 +125,7 @@ async function embeddingKeywordMatch(text) {
   const msgEmb = await getEmbedding(text)
   if (!msgEmb) return null
 
-  const threshold = parseFloat(process.env.AI_THRESHOLD || '0.55')
+  const threshold = aiThreshold
   let bestScore = 0
   let bestKeyword = null
 
@@ -387,7 +388,10 @@ async function pullLoop() {
 
     // Sync config
     if (data.filterMode) filterMode = data.filterMode
-    if (data.aiThreshold) process.env.AI_THRESHOLD = String(data.aiThreshold)
+    if (data.aiThreshold) {
+      aiThreshold = parseFloat(data.aiThreshold)
+      console.log('[THRESHOLD sync]', aiThreshold)
+    }
     if (data.anthropicKey) anthropicKey = data.anthropicKey
     if (data.aiPrompt !== undefined && data.aiPrompt !== promptText) {
       promptText = data.aiPrompt
@@ -453,8 +457,8 @@ async function pullLoop() {
           console.log('[PROMPT]', promptText.slice(0, 80))
         }
         if (cmd.command === 'update_threshold') {
-          process.env.AI_THRESHOLD = cmd.payload
-          console.log('[THRESHOLD]', cmd.payload)
+          aiThreshold = parseFloat(cmd.payload)
+          console.log('[THRESHOLD]', aiThreshold)
         }
         if (cmd.command === 'set_cloudflare') {
           try {
