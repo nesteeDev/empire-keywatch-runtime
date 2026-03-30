@@ -143,10 +143,27 @@ async function embeddingKeywordMatch(text) {
 }
 
 // Exact keyword match (fallback when no CF or quota exceeded)
+// Word boundary: character before and after keyword must NOT be a letter
 function exactKeywordMatch(text) {
   const lower = text.toLowerCase()
   for (const kw of keywords) {
-    if (lower.includes(kw.toLowerCase())) return kw
+    const kwLower = kw.toLowerCase()
+    let pos = 0
+    while (true) {
+      const idx = lower.indexOf(kwLower, pos)
+      if (idx === -1) break
+
+      const charBefore = idx > 0 ? lower[idx - 1] : ' '
+      const charAfter = idx + kwLower.length < lower.length ? lower[idx + kwLower.length] : ' '
+
+      // Check that surrounding chars are not letters (any script)
+      const isLetterBefore = /\p{L}/u.test(charBefore)
+      const isLetterAfter = /\p{L}/u.test(charAfter)
+
+      if (!isLetterBefore && !isLetterAfter) return kw
+
+      pos = idx + 1
+    }
   }
   return null
 }
