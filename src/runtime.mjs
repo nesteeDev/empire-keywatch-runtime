@@ -57,6 +57,32 @@ let keywordEmbeddings = new Map() // keyword -> embedding vector
 let embeddingsFailed = false // fallback flag when CF quota exceeded
 
 async function getEmbedding(text) {
+  // Try proxy first (orchestrator handles quota), fallback to direct CF
+  if (ORCH && TOKEN) {
+    try {
+      const res = await fetch(ORCH + '/api/embeddings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
+        body: JSON.stringify({ texts: [text] }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.fallback) {
+          // Quota exceeded or CF error — fallback to exact match
+          if (data.reason === 'quota_exceeded') {
+            console.log('[EMB] Quota exceeded (' + data.used + '/' + data.limit + '), falling back to exact match')
+            embeddingsFailed = true
+          }
+          return null
+        }
+        return data.embeddings?.[0] || null
+      }
+    } catch (e) {
+      // Proxy failed — try direct CF
+    }
+  }
+
+  // Direct CF (if user has own keys)
   if (!cfAccountId || !cfApiToken) return null
   try {
     const res = await fetch(
