@@ -26,7 +26,8 @@ let filterMode = 'keywords' // keywords | prompt | hybrid
 let promptText = ''
 let anthropicKey = ''
 let aiThreshold = 0.55
-let useCandidate = false // true = send to /api/candidate (profiles), false = /api/alert (legacy)
+let useCandidate = false
+let minMessageLength = 10 // configurable via /minlength
 
 // --- Orchestrator communication ---
 
@@ -256,6 +257,7 @@ client.on('update', async (update) => {
   const chatId = String(msg.chat_id)
 
   if (!monitoredChats.has(chatId)) return
+  if (text.length < minMessageLength) return
 
   let matched = null
 
@@ -434,6 +436,7 @@ async function pullLoop() {
       aiThreshold = parseFloat(data.aiThreshold)
     }
     if (data.useCandidate !== undefined) useCandidate = !!data.useCandidate
+    if (data.minMessageLength !== undefined) minMessageLength = parseInt(data.minMessageLength) || 10
     // Use allKeywords (union of all profiles) if available
     if (data.allKeywords && data.allKeywords.length > 0) {
       const newKw = JSON.stringify(data.allKeywords)
@@ -513,6 +516,10 @@ async function pullLoop() {
         if (cmd.command === 'update_prompt') {
           promptText = cmd.payload
           console.log('[PROMPT]', promptText.slice(0, 80))
+        }
+        if (cmd.command === 'update_minlength') {
+          minMessageLength = parseInt(cmd.payload) || 10
+          console.log('[MINLENGTH]', minMessageLength)
         }
         if (cmd.command === 'update_threshold') {
           aiThreshold = parseFloat(cmd.payload)
