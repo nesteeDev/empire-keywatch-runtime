@@ -489,6 +489,10 @@ async function pullLoop() {
         if (cmd.command === 'list_chats') {
           await syncChatList()
         }
+        if (cmd.command === 'restart') {
+          console.log('[RESTART] Restart command received')
+          process.exit(0) // Railway/systemd will restart
+        }
       } catch (e) { console.error('[CMD ERROR]', e.message) }
     }
   }
