@@ -43,7 +43,9 @@ async function orchPost(path, body) {
 
 async function orchGet(path) {
   try {
-    const res = await fetch(ORCH + path + '?token=' + encodeURIComponent(TOKEN))
+    const res = await fetch(ORCH + path, {
+      headers: { 'Authorization': 'Bearer ' + TOKEN },
+    })
     if (!res.ok) return null
     return await res.json()
   } catch (e) { console.error('orch error:', e.message); return null }
