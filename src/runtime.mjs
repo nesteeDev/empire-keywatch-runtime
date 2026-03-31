@@ -26,6 +26,7 @@ let filterMode = 'keywords' // keywords | prompt | hybrid
 let promptText = ''
 let anthropicKey = ''
 let aiThreshold = 0.55
+let useCandidate = false // true = send to /api/candidate (profiles), false = /api/alert (legacy)
 
 // --- Orchestrator communication ---
 
@@ -284,7 +285,8 @@ client.on('update', async (update) => {
     messageLink = 'https://t.me/c/' + strChatId.slice(4) + '/' + msg.id
   }
 
-  await orchPost('/api/alert', {
+  const endpoint = useCandidate ? '/api/candidate' : '/api/alert'
+  await orchPost(endpoint, {
     text,
     groupUsername: groupTitle,
     groupId: chatId,
@@ -402,7 +404,17 @@ async function pullLoop() {
     if (data.filterMode) filterMode = data.filterMode
     if (data.aiThreshold) {
       aiThreshold = parseFloat(data.aiThreshold)
-      console.log('[THRESHOLD sync]', aiThreshold)
+    }
+    if (data.useCandidate !== undefined) useCandidate = !!data.useCandidate
+    // Use allKeywords (union of all profiles) if available
+    if (data.allKeywords && data.allKeywords.length > 0) {
+      const newKw = JSON.stringify(data.allKeywords)
+      const oldKw = JSON.stringify(keywords)
+      if (newKw !== oldKw) {
+        keywords = data.allKeywords
+        console.log('[KEYWORDS from profiles]', keywords.length, 'words')
+        await updateKeywordEmbeddings()
+      }
     }
     if (data.anthropicKey) anthropicKey = data.anthropicKey
     if (data.aiPrompt !== undefined && data.aiPrompt !== promptText) {
