@@ -450,27 +450,33 @@ async function pullLoop() {
       console.log('[PROMPT]', promptText.slice(0, 80))
     }
 
-    // Sync keywords + recompute embeddings if changed
-    if (data.keywords) {
+    // Legacy keywords sync (only if allKeywords not provided)
+    if (!data.allKeywords && data.keywords) {
       const newKw = JSON.stringify(data.keywords)
       const oldKw = JSON.stringify(keywords)
       if (newKw !== oldKw) {
         keywords = data.keywords
-        console.log('[KEYWORDS]', keywords.length, 'words')
+        console.log('[KEYWORDS legacy]', keywords.length, 'words')
         await updateKeywordEmbeddings()
       }
     }
 
     // Sync monitored groups
-    if (data.groups && monitoredChats.size === 0) {
+    if (data.groups) {
+      // Remove groups no longer in orchestrator
+      const newGroupIds = new Set(data.groups.map(g => g.id).filter(Boolean))
+      for (const [id] of monitoredChats) {
+        if (!newGroupIds.has(id)) { monitoredChats.delete(id); console.log('[UNSYNC]', id) }
+      }
+      // Add missing groups
       for (const g of data.groups) {
         const chatId = g.id || ''
         const name = g.username || ''
-        if (chatId) {
+        if (chatId && !monitoredChats.has(chatId)) {
           try {
             const chat = await client.invoke({ _: 'getChat', chat_id: parseInt(chatId) })
             monitoredChats.set(chatId, chat.title || name || chatId)
-            console.log('[RESTORED]', chat.title, 'id:', chatId)
+            console.log('[SYNC+]', chat.title, 'id:', chatId)
           } catch {
             monitoredChats.set(chatId, name || chatId)
           }
