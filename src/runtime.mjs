@@ -35,15 +35,22 @@ let haikuUsedSession = 0   // track usage this session to report back
 
 // --- Orchestrator communication ---
 
-async function orchPost(path, body) {
-  try {
-    const res = await fetch(ORCH + path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
-      body: JSON.stringify(body),
-    })
-    return res.ok
-  } catch (e) { console.error('orch error:', e.message); return false }
+async function orchPost(path, body, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(ORCH + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
+        body: JSON.stringify(body),
+      })
+      if (res.ok) return true
+      if (res.status >= 400 && res.status < 500) return false // client error, don't retry
+    } catch (e) {
+      if (i === retries - 1) { console.error('orch error:', e.message); return false }
+    }
+    await new Promise(r => setTimeout(r, (i + 1) * 2000)) // 2s, 4s, 6s
+  }
+  return false
 }
 
 async function orchGet(path) {
