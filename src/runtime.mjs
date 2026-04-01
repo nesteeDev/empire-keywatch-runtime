@@ -28,6 +28,10 @@ let anthropicKey = ''
 let aiThreshold = 0.55
 let useCandidate = false
 let minMessageLength = 10 // configurable via /minlength
+let haikuKey = ''          // built-in Haiku key from orchestrator
+let haikuRemaining = 0     // checks remaining (daily for premium, lifetime for free)
+let hasOwnKey = false       // user has their own Anthropic key
+let haikuUsedSession = 0   // track usage this session to report back
 
 // --- Orchestrator communication ---
 
@@ -205,13 +209,18 @@ function exactKeywordMatch(text) {
 
 // Returns: 'AI: prompt match' | 'no' | null (null = error/unavailable)
 async function haikuMatch(text) {
-  if (!anthropicKey || !promptText) return null
+  const key = anthropicKey || haikuKey
+  if (!key || !promptText) return null
+  if (!anthropicKey && haikuRemaining <= 0) {
+    console.log('[HAIKU] limit reached')
+    return null
+  }
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
-        'x-api-key': anthropicKey,
+        'x-api-key': key,
         'anthropic-version': '2023-06-01',
         'Content-Type': 'application/json',
       },
@@ -228,8 +237,12 @@ async function haikuMatch(text) {
       const err = await res.text()
       console.error('[HAIKU] error:', res.status, err.slice(0, 100))
       if (res.status === 401) {
-        await orchPost('/api/login-status', { status: 'error', message: 'Anthropic API key is invalid. Check /setupai → Anthropic.' })
-        anthropicKey = '' // disable until fixed
+        if (anthropicKey) {
+          // User's own key is invalid
+          await orchPost('/api/login-status', { status: 'error', message: 'Anthropic API key is invalid. Check /setupai → Anthropic.' })
+          anthropicKey = '' // disable until fixed
+        }
+        // Don't clear haikuKey — it's our key, shouldn't be invalid
       }
       return null // error — caller decides what to do
     }
@@ -238,6 +251,17 @@ async function haikuMatch(text) {
     const answer = data.content?.[0]?.text?.trim().toUpperCase() || ''
     const isMatch = answer.startsWith('YES')
     console.log('[HAIKU]', isMatch ? 'MATCH' : 'no match', ':', text.slice(0, 50), '->', answer)
+
+    // Track usage for built-in key
+    if (!anthropicKey) {
+      haikuRemaining--
+      haikuUsedSession++
+      // Report usage every 5 checks
+      if (haikuUsedSession % 5 === 0) {
+        orchPost('/api/haiku-usage', { count: 5 }).catch(() => {})
+      }
+    }
+
     return isMatch ? 'AI: prompt match' : 'no'
   } catch (e) {
     console.error('[HAIKU] error:', e.message)
@@ -448,6 +472,17 @@ async function pullLoop() {
       }
     }
     if (data.anthropicKey) anthropicKey = data.anthropicKey
+    if (data.haikuKey !== undefined) haikuKey = data.haikuKey
+    if (data.haikuRemaining !== undefined) haikuRemaining = data.haikuRemaining
+    if (data.hasOwnKey !== undefined) hasOwnKey = data.hasOwnKey
+    // Report any unreported built-in Haiku usage
+    if (haikuUsedSession > 0) {
+      const unreported = haikuUsedSession % 5 // remainder not yet reported in batches of 5
+      if (unreported > 0) {
+        orchPost('/api/haiku-usage', { count: unreported }).catch(() => {})
+      }
+      haikuUsedSession = 0
+    }
     if (data.aiPrompt !== undefined && data.aiPrompt !== promptText) {
       promptText = data.aiPrompt
       console.log('[PROMPT]', promptText.slice(0, 80))
