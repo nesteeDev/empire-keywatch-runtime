@@ -216,6 +216,13 @@ async function haikuMatch(text) {
     return null
   }
 
+  // Pre-track usage for built-in key (before API call to survive crashes)
+  if (!anthropicKey) {
+    haikuRemaining--
+    haikuUsedSession++
+    orchPost('/api/haiku-usage', { count: 1 }).catch(() => {})
+  }
+
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -251,16 +258,6 @@ async function haikuMatch(text) {
     const answer = data.content?.[0]?.text?.trim().toUpperCase() || ''
     const isMatch = answer.startsWith('YES')
     console.log('[HAIKU]', isMatch ? 'MATCH' : 'no match', ':', text.slice(0, 50), '->', answer)
-
-    // Track usage for built-in key
-    if (!anthropicKey) {
-      haikuRemaining--
-      haikuUsedSession++
-      // Report usage every 5 checks
-      if (haikuUsedSession % 5 === 0) {
-        orchPost('/api/haiku-usage', { count: 5 }).catch(() => {})
-      }
-    }
 
     return isMatch ? 'AI: prompt match' : 'no'
   } catch (e) {
@@ -475,14 +472,8 @@ async function pullLoop() {
     if (data.haikuKey !== undefined) haikuKey = data.haikuKey
     if (data.haikuRemaining !== undefined) haikuRemaining = data.haikuRemaining
     if (data.hasOwnKey !== undefined) hasOwnKey = data.hasOwnKey
-    // Report any unreported built-in Haiku usage
-    if (haikuUsedSession > 0) {
-      const unreported = haikuUsedSession % 5 // remainder not yet reported in batches of 5
-      if (unreported > 0) {
-        orchPost('/api/haiku-usage', { count: unreported }).catch(() => {})
-      }
-      haikuUsedSession = 0
-    }
+    // Reset session counter on pull (usage already reported per-call)
+    haikuUsedSession = 0
     if (data.aiPrompt !== undefined && data.aiPrompt !== promptText) {
       promptText = data.aiPrompt
       console.log('[PROMPT]', promptText.slice(0, 80))
