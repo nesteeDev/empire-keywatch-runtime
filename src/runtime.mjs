@@ -242,7 +242,7 @@ async function haikuMatch(text) {
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 5,
         messages: [
-          { role: 'user', content: `Does this message match the following criteria? Answer ONLY "YES" or "NO".\n\nCriteria: ${promptText}\n\nMessage: ${text}` }
+          { role: 'user', content: `Does this message match the following criteria? The message can be in ANY language — match by meaning, not language. Answer ONLY "YES" or "NO".\n\nCriteria: ${promptText}\n\nMessage: ${text}` }
         ],
       }),
     })
