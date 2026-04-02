@@ -18,11 +18,11 @@ const client = tdl.createClient({
   filesDirectory: DATA + '/tdlib_files',
 })
 
-const RUNTIME_VERSION = '1.2.0'
+const RUNTIME_VERSION = '1.3.0'
 
 let keywords = []
 let monitoredChats = new Map() // chatId -> title
-let filterMode = 'keywords' // keywords | prompt | hybrid
+let filterMode = 'keywords' // user-level default (backward compat)
 let promptText = ''
 let anthropicKey = ''
 let aiThreshold = 0.55
@@ -32,6 +32,10 @@ let haikuKey = ''          // built-in Haiku key from orchestrator
 let haikuRemaining = 0     // checks remaining (daily for premium, lifetime for free)
 let hasOwnKey = false       // user has their own Anthropic key
 let haikuUsedSession = 0   // track usage this session to report back
+
+// --- Per-profile data ---
+let profilesData = []       // from pull: [{id, name, mode, keywords, prompt, threshold, groupIds}]
+let profileEmbeddings = new Map() // profileId -> Map<keyword, embedding>
 
 // --- Orchestrator communication ---
 
@@ -67,7 +71,7 @@ async function orchGet(path) {
 
 let cfAccountId = process.env.CF_ACCOUNT_ID || ''
 let cfApiToken = process.env.CF_API_TOKEN || ''
-let keywordEmbeddings = new Map() // keyword -> embedding vector
+let keywordEmbeddings = new Map() // keyword -> embedding vector (global cache for backward compat)
 let embeddingsFailed = false // fallback flag when CF quota exceeded
 
 async function getEmbedding(text) {
@@ -134,9 +138,10 @@ function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB))
 }
 
-// Cache embeddings for each keyword individually
+// Cache embeddings for each keyword individually (global — used for backward compat)
 async function updateKeywordEmbeddings() {
-  if (!cfAccountId || !cfApiToken || keywords.length === 0) return
+  if (!cfAccountId && !cfApiToken && !ORCH) return
+  if (keywords.length === 0) return
   embeddingsFailed = false
   console.log('[EMB] computing embeddings for', keywords.length, 'keywords...')
 
@@ -159,7 +164,78 @@ async function updateKeywordEmbeddings() {
   console.log('[EMB]', keywordEmbeddings.size, 'embeddings cached,', cached, 'reused')
 }
 
-// Match message against keyword embeddings
+// Compute per-profile embeddings (reuses global cache when possible)
+async function updateProfileEmbeddings() {
+  if (!cfAccountId && !cfApiToken && !ORCH) return
+  if (profilesData.length === 0) return
+  embeddingsFailed = false
+
+  const allKws = new Set()
+  for (const p of profilesData) {
+    for (const kw of p.keywords) allKws.add(kw)
+  }
+
+  console.log('[EMB] computing profile embeddings for', allKws.size, 'unique keywords...')
+
+  // Build/update global cache for all keywords across profiles
+  let cached = 0
+  for (const kw of allKws) {
+    if (keywordEmbeddings.has(kw)) { cached++; continue }
+    const emb = await getEmbedding(kw)
+    if (emb) {
+      keywordEmbeddings.set(kw, emb)
+    } else if (embeddingsFailed) {
+      break
+    }
+  }
+
+  // Remove keywords no longer in any profile
+  for (const [k] of keywordEmbeddings) {
+    if (!allKws.has(k)) keywordEmbeddings.delete(k)
+  }
+
+  // Build per-profile embedding maps (references to global cache)
+  profileEmbeddings.clear()
+  for (const p of profilesData) {
+    const map = new Map()
+    for (const kw of p.keywords) {
+      const emb = keywordEmbeddings.get(kw)
+      if (emb) map.set(kw, emb)
+    }
+    profileEmbeddings.set(p.id, map)
+  }
+
+  console.log('[EMB]', keywordEmbeddings.size, 'embeddings cached,', cached, 'reused,', profileEmbeddings.size, 'profiles')
+}
+
+// Match message against a specific profile's keyword embeddings
+async function embeddingKeywordMatchForProfile(text, profileId, threshold) {
+  const profEmbs = profileEmbeddings.get(profileId)
+  if (!profEmbs || profEmbs.size === 0 || embeddingsFailed) return null
+
+  const msgEmb = await getEmbedding(text)
+  if (!msgEmb) return null
+
+  let bestScore = 0
+  let bestKeyword = null
+
+  for (const [kw, kwEmb] of profEmbs) {
+    const score = cosineSimilarity(msgEmb, kwEmb)
+    if (score > bestScore) {
+      bestScore = score
+      bestKeyword = kw
+    }
+  }
+
+  if (bestScore >= threshold && bestKeyword) {
+    console.log('[EMB] MATCH', bestKeyword, 'score=' + bestScore.toFixed(3), ':', text.slice(0, 50))
+    return bestKeyword + ' (' + bestScore.toFixed(2) + ')'
+  }
+
+  return null
+}
+
+// Legacy: match against global keyword embeddings (backward compat)
 async function embeddingKeywordMatch(text) {
   if (embeddingsFailed || keywordEmbeddings.size === 0) return null
 
@@ -186,11 +262,10 @@ async function embeddingKeywordMatch(text) {
   return null
 }
 
-// Exact keyword match (fallback when no CF or quota exceeded)
-// Word boundary: character before and after keyword must NOT be a letter
-function exactKeywordMatch(text) {
+// Exact keyword match against a specific keyword list
+function exactKeywordMatchList(text, kwList) {
   const lower = text.toLowerCase()
-  for (const kw of keywords) {
+  for (const kw of kwList) {
     const kwLower = kw.toLowerCase()
     let pos = 0
     while (true) {
@@ -200,7 +275,6 @@ function exactKeywordMatch(text) {
       const charBefore = idx > 0 ? lower[idx - 1] : ' '
       const charAfter = idx + kwLower.length < lower.length ? lower[idx + kwLower.length] : ' '
 
-      // Check that surrounding chars are not letters (any script)
       const isLetterBefore = /\p{L}/u.test(charBefore)
       const isLetterAfter = /\p{L}/u.test(charAfter)
 
@@ -212,12 +286,17 @@ function exactKeywordMatch(text) {
   return null
 }
 
+// Exact keyword match (fallback when no CF or quota exceeded) — legacy global
+function exactKeywordMatch(text) {
+  return exactKeywordMatchList(text, keywords)
+}
+
 // --- Anthropic Haiku (for prompt mode) ---
 
 // Returns: 'AI: prompt match' | 'no' | null (null = error/unavailable)
-async function haikuMatch(text) {
+async function haikuMatchWithPrompt(text, prompt) {
   const key = anthropicKey || haikuKey
-  if (!key || !promptText) return null
+  if (!key || !prompt) return null
   if (!anthropicKey && haikuRemaining <= 0) {
     console.log('[HAIKU] limit reached')
     return null
@@ -242,7 +321,7 @@ async function haikuMatch(text) {
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 5,
         messages: [
-          { role: 'user', content: `Does this message match the following criteria? The message can be in ANY language — match by meaning, not language. Answer ONLY "YES" or "NO".\n\nCriteria: ${promptText}\n\nMessage: ${text}` }
+          { role: 'user', content: `Does this message match the following criteria? The message can be in ANY language — match by meaning, not language. Answer ONLY "YES" or "NO".\n\nCriteria: ${prompt}\n\nMessage: ${text}` }
         ],
       }),
     })
@@ -252,13 +331,11 @@ async function haikuMatch(text) {
       console.error('[HAIKU] error:', res.status, err.slice(0, 100))
       if (res.status === 401) {
         if (anthropicKey) {
-          // User's own key is invalid
           await orchPost('/api/login-status', { status: 'error', message: 'Anthropic API key is invalid. Check /setupai → Anthropic.' })
-          anthropicKey = '' // disable until fixed
+          anthropicKey = ''
         }
-        // Don't clear haikuKey — it's our key, shouldn't be invalid
       }
-      return null // error — caller decides what to do
+      return null
     }
 
     const data = await res.json()
@@ -269,8 +346,24 @@ async function haikuMatch(text) {
     return isMatch ? 'AI: prompt match' : 'no'
   } catch (e) {
     console.error('[HAIKU] error:', e.message)
-    return null // error
+    return null
   }
+}
+
+// Legacy wrapper using global promptText
+async function haikuMatch(text) {
+  return haikuMatchWithPrompt(text, promptText)
+}
+
+// --- Per-profile message handler ---
+
+function getProfilesForChat(chatId) {
+  if (profilesData.length === 0) return []
+  const matching = profilesData.filter(p => p.groupIds.includes(chatId))
+  if (matching.length > 0) return matching
+  // Fallback: default profile
+  const def = profilesData.find(p => p.name === 'default')
+  return def ? [def] : []
 }
 
 // --- Combined message handler ---
@@ -287,38 +380,146 @@ client.on('update', async (update) => {
   if (!monitoredChats.has(chatId)) return
   if (text.length < minMessageLength) return
 
+  // --- Per-profile path (new) ---
+  if (profilesData.length > 0 && useCandidate) {
+    const profiles = getProfilesForChat(chatId)
+    if (profiles.length === 0) return
+
+    // Cache message embedding (computed once, reused across profiles)
+    let msgEmbedding = null
+    let msgEmbeddingComputed = false
+
+    for (const profile of profiles) {
+      let matched = null
+
+      if (profile.mode === 'keywords') {
+        // Embedding match against this profile's keywords
+        const profEmbs = profileEmbeddings.get(profile.id)
+        if (profEmbs && profEmbs.size > 0 && !embeddingsFailed) {
+          // Get or compute message embedding
+          if (!msgEmbeddingComputed) {
+            msgEmbedding = await getEmbedding(text)
+            msgEmbeddingComputed = true
+          }
+          if (msgEmbedding) {
+            let bestScore = 0
+            let bestKeyword = null
+            for (const [kw, kwEmb] of profEmbs) {
+              const score = cosineSimilarity(msgEmbedding, kwEmb)
+              if (score > bestScore) {
+                bestScore = score
+                bestKeyword = kw
+              }
+            }
+            if (bestScore >= profile.threshold && bestKeyword) {
+              matched = bestKeyword + ' (' + bestScore.toFixed(2) + ')'
+            }
+          }
+        }
+        // Fallback: exact match
+        if (!matched) {
+          const exact = exactKeywordMatchList(text, profile.keywords)
+          if (exact) matched = exact + ' [exact]'
+        }
+      } else if (profile.mode === 'prompt') {
+        // Haiku only — no keywords needed
+        matched = await haikuMatchWithPrompt(text, profile.prompt)
+        if (matched === 'no') matched = null
+      } else if (profile.mode === 'hybrid') {
+        // Keywords first
+        const profEmbs = profileEmbeddings.get(profile.id)
+        if (profEmbs && profEmbs.size > 0 && !embeddingsFailed) {
+          if (!msgEmbeddingComputed) {
+            msgEmbedding = await getEmbedding(text)
+            msgEmbeddingComputed = true
+          }
+          if (msgEmbedding) {
+            let bestScore = 0
+            let bestKeyword = null
+            for (const [kw, kwEmb] of profEmbs) {
+              const score = cosineSimilarity(msgEmbedding, kwEmb)
+              if (score > bestScore) {
+                bestScore = score
+                bestKeyword = kw
+              }
+            }
+            if (bestScore >= profile.threshold && bestKeyword) {
+              matched = bestKeyword + ' (' + bestScore.toFixed(2) + ')'
+            }
+          }
+        }
+        if (!matched) {
+          const exact = exactKeywordMatchList(text, profile.keywords)
+          if (exact) matched = exact + ' [exact]'
+        }
+        // Haiku double-check if keyword matched
+        if (matched && profile.prompt) {
+          const haikuResult = await haikuMatchWithPrompt(text, profile.prompt)
+          if (haikuResult === 'no') {
+            matched = null
+          } else if (haikuResult === null) {
+            console.log('[HYBRID] Haiku unavailable for profile', profile.name, ', passing keyword match through')
+          }
+        }
+      }
+
+      if (!matched) continue
+
+      const groupTitle = monitoredChats.get(chatId) || chatId
+      console.log('[MATCH]', groupTitle, '| profile:', profile.name, ':', text.slice(0, 80), '| by:', matched)
+
+      let senderName = '', senderUsername = '', senderId = 0
+      try {
+        if (msg.sender_id?._ === 'messageSenderUser') {
+          const user = await client.invoke({ _: 'getUser', user_id: msg.sender_id.user_id })
+          senderName = [user.first_name, user.last_name].filter(Boolean).join(' ')
+          senderUsername = user.usernames?.active_usernames?.[0] || ''
+          senderId = user.id
+        }
+      } catch {}
+
+      let messageLink = ''
+      const strChatId = String(msg.chat_id)
+      if (strChatId.startsWith('-100') && msg.id) {
+        messageLink = 'https://t.me/c/' + strChatId.slice(4) + '/' + msg.id
+      }
+
+      await orchPost('/api/candidate', {
+        text,
+        groupUsername: groupTitle,
+        groupId: chatId,
+        keywordMatched: matched,
+        profileId: profile.id,
+        profileName: profile.name,
+        messageLink,
+        senderName,
+        senderUsername,
+        senderId,
+      })
+    }
+    return
+  }
+
+  // --- Legacy flat path (backward compat: no profilesData or useCandidate=false) ---
   let matched = null
 
   if (filterMode === 'keywords') {
     if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
-      // Embeddings available — use only embeddings
       matched = await embeddingKeywordMatch(text)
     } else {
-      // No CF or quota exceeded — exact match only
       const exact = exactKeywordMatch(text)
       if (exact) matched = exact + ' [exact]'
     }
   } else if (filterMode === 'prompt') {
-    if (useCandidate) {
-      // Multi-profile: just do embedding pre-filter, candidate handles per-profile logic
-      if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
-        matched = await embeddingKeywordMatch(text)
-      }
-      if (!matched) matched = await haikuMatch(text)
-    } else {
-      // Single profile: Haiku only
-      matched = await haikuMatch(text)
-    }
+    matched = await haikuMatch(text)
   } else if (filterMode === 'hybrid') {
-    // Keywords first
     if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
       matched = await embeddingKeywordMatch(text)
     } else {
       const exact = exactKeywordMatch(text)
       if (exact) matched = exact + ' [exact]'
     }
-    if (matched && !useCandidate) {
-      // Single profile: Haiku double-checks
+    if (matched) {
       const haikuResult = await haikuMatch(text)
       if (haikuResult === 'no') {
         matched = null
@@ -326,7 +527,6 @@ client.on('update', async (update) => {
         console.log('[HYBRID] Haiku unavailable, passing keyword match through')
       }
     }
-    // Multi-profile (useCandidate): skip Haiku here, candidate handles per-profile
   }
 
   if (!matched) return
@@ -472,14 +672,29 @@ async function pullLoop() {
     }
     if (data.useCandidate !== undefined) useCandidate = !!data.useCandidate
     if (data.minMessageLength !== undefined) minMessageLength = parseInt(data.minMessageLength) || 10
-    // Use allKeywords (union of all profiles) if available
+
+    // --- Per-profile sync ---
+    if (data.profilesData && data.profilesData.length > 0) {
+      const newPD = JSON.stringify(data.profilesData)
+      const oldPD = JSON.stringify(profilesData)
+      if (newPD !== oldPD) {
+        profilesData = data.profilesData
+        console.log('[PROFILES]', profilesData.length, 'profiles:', profilesData.map(p => p.name + '(' + p.mode + ',' + p.keywords.length + 'kw)').join(', '))
+        await updateProfileEmbeddings()
+      }
+    }
+
+    // Use allKeywords (union of all profiles) for backward compat + global cache
     if (data.allKeywords && data.allKeywords.length > 0) {
       const newKw = JSON.stringify(data.allKeywords)
       const oldKw = JSON.stringify(keywords)
       if (newKw !== oldKw) {
         keywords = data.allKeywords
         console.log('[KEYWORDS from profiles]', keywords.length, 'words')
-        await updateKeywordEmbeddings()
+        // Only update global embeddings if no profilesData (backward compat)
+        if (!data.profilesData || data.profilesData.length === 0) {
+          await updateKeywordEmbeddings()
+        }
       }
     }
     if (data.anthropicKey) anthropicKey = data.anthropicKey
@@ -572,7 +787,11 @@ async function pullLoop() {
             cfApiToken = cf.apiToken
             embeddingsFailed = false
             console.log('[CF] credentials updated')
-            await updateKeywordEmbeddings()
+            if (profilesData.length > 0) {
+              await updateProfileEmbeddings()
+            } else {
+              await updateKeywordEmbeddings()
+            }
           } catch {}
         }
         if (cmd.command === 'set_anthropic') {
@@ -594,7 +813,11 @@ async function pullLoop() {
 }
 
 // Initial keyword embeddings
-await updateKeywordEmbeddings()
+if (profilesData.length > 0) {
+  await updateProfileEmbeddings()
+} else {
+  await updateKeywordEmbeddings()
+}
 
 console.log('Runtime ready. Pull loop starting...')
 pullLoop()
