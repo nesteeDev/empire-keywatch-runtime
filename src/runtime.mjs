@@ -302,12 +302,12 @@ async function haikuMatchWithPrompt(text, prompt) {
     return null
   }
 
-  // Pre-track usage for built-in key (before API call to survive crashes)
+  // Pre-track usage (before API call to survive crashes)
   if (!anthropicKey) {
     haikuRemaining--
-    haikuUsedSession++
-    orchPost('/api/haiku-usage', { count: 1 }).catch(() => {})
   }
+  haikuUsedSession++
+  orchPost('/api/haiku-usage', { count: 1 }).catch(() => {})
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
