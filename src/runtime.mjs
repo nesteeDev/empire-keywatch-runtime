@@ -299,27 +299,34 @@ client.on('update', async (update) => {
       if (exact) matched = exact + ' [exact]'
     }
   } else if (filterMode === 'prompt') {
-    // Haiku only
-    matched = await haikuMatch(text)
+    if (useCandidate) {
+      // Multi-profile: just do embedding pre-filter, candidate handles per-profile logic
+      if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
+        matched = await embeddingKeywordMatch(text)
+      }
+      if (!matched) matched = await haikuMatch(text)
+    } else {
+      // Single profile: Haiku only
+      matched = await haikuMatch(text)
+    }
   } else if (filterMode === 'hybrid') {
-    // Keywords first, then Haiku confirms
+    // Keywords first
     if (cfAccountId && cfApiToken && keywordEmbeddings.size > 0 && !embeddingsFailed) {
       matched = await embeddingKeywordMatch(text)
     } else {
       const exact = exactKeywordMatch(text)
       if (exact) matched = exact + ' [exact]'
     }
-    if (matched) {
-      // Haiku double-checks
+    if (matched && !useCandidate) {
+      // Single profile: Haiku double-checks
       const haikuResult = await haikuMatch(text)
       if (haikuResult === 'no') {
-        matched = null // Haiku explicitly rejected
+        matched = null
       } else if (haikuResult === null) {
-        // Haiku error/unavailable — keep keyword match, don't block
         console.log('[HYBRID] Haiku unavailable, passing keyword match through')
       }
-      // haikuResult === 'AI: prompt match' — confirmed
     }
+    // Multi-profile (useCandidate): skip Haiku here, candidate handles per-profile
   }
 
   if (!matched) return
