@@ -1,6 +1,8 @@
 import 'dotenv/config'
 import tdl from 'tdl'
 import prebuilt from 'prebuilt-tdlib'
+import fs from 'fs'
+import path from 'path'
 
 tdl.configure({ tdjson: prebuilt.getTdjson() })
 
@@ -10,6 +12,31 @@ const DATA = process.env.DATA_DIR || './data'
 
 console.log('Starting KeyWatch Runtime...')
 console.log('Orchestrator:', ORCH)
+
+// --- Session transfer: download TDLib session from pool for Railway migration ---
+const SESSION_URL = process.env.SESSION_URL || ''
+const SESSION_SECRET = process.env.SESSION_SECRET || ''
+if (SESSION_URL && !fs.existsSync(path.join(DATA, 'tdlib_db', 'db.sqlite'))) {
+  console.log('[SESSION] Downloading TDLib session from pool...')
+  try {
+    const res = await fetch(SESSION_URL, {
+      headers: SESSION_SECRET ? { 'Authorization': 'Bearer ' + SESSION_SECRET } : {},
+    })
+    if (res.ok) {
+      const tarData = Buffer.from(await res.arrayBuffer())
+      fs.mkdirSync(path.join(DATA, 'tdlib_db'), { recursive: true })
+      fs.writeFileSync('/tmp/session.tar.gz', tarData)
+      const { execSync } = await import('child_process')
+      execSync(`tar xzf /tmp/session.tar.gz -C "${path.join(DATA, 'tdlib_db')}"`)
+      fs.unlinkSync('/tmp/session.tar.gz')
+      console.log('[SESSION] TDLib session restored from pool!')
+    } else {
+      console.error('[SESSION] Download failed:', res.status, await res.text().catch(() => ''))
+    }
+  } catch (e) {
+    console.error('[SESSION] Failed to download session:', e.message)
+  }
+}
 
 const client = tdl.createClient({
   apiId: parseInt(process.env.TG_API_ID),
@@ -25,7 +52,7 @@ let monitoredChats = new Map() // chatId -> title
 let filterMode = 'keywords' // user-level default (backward compat)
 let promptText = ''
 let anthropicKey = ''
-let aiThreshold = 0.55
+let aiThreshold = 0.45
 let useCandidate = false
 let minMessageLength = 10 // configurable via /minlength
 let haikuKey = ''          // built-in Haiku key from orchestrator
@@ -368,7 +395,17 @@ function getProfilesForChat(chatId) {
 
 // --- Combined message handler ---
 
+// Temporary: log all update types to debug missing messages
+let debugUpdateCounter = 0
 client.on('update', async (update) => {
+  // Log every 100th non-message update + ALL message updates for monitored chats
+  if (update._ === 'updateNewMessage') {
+    const m = update.message
+    if (m) console.log(`[UPD] newMsg chat=${m.chat_id} chatStr="${String(m.chat_id)}" monitored=${monitoredChats.has(String(m.chat_id))} keys=[${[...monitoredChats.keys()].join(',')}] outgoing=${m.is_outgoing} type=${m.content?._}`)
+  } else if (debugUpdateCounter++ % 200 === 0) {
+    console.log(`[UPD] ${update._}`)
+  }
+
   if (update._ !== 'updateNewMessage') return
   const msg = update.message
   if (!msg || msg.is_outgoing) return
@@ -384,11 +421,15 @@ client.on('update', async (update) => {
     }
     return
   }
-  if (text.length < minMessageLength) return
+  if (text.length < minMessageLength) {
+    console.log(`[SKIP] minLen chat=${chatId} len=${text.length} min=${minMessageLength}`)
+    return
+  }
 
   // --- Per-profile path (new) ---
   if (profilesData.length > 0 && useCandidate) {
     const profiles = getProfilesForChat(chatId)
+    console.log(`[PROFILE] chat=${chatId} profiles=${profiles.length} profilesData=${profilesData.length} useCandidate=${useCandidate} groupIds=${profilesData.map(p=>p.name+':'+JSON.stringify(p.groupIds)).join('|')}`)
     if (profiles.length === 0) return
 
     // Cache message embedding (computed once, reused across profiles)
@@ -401,11 +442,12 @@ client.on('update', async (update) => {
       if (profile.mode === 'keywords') {
         // Embedding match against this profile's keywords
         const profEmbs = profileEmbeddings.get(profile.id)
+        console.log(`[EMB-DBG] profile=${profile.name} mode=${profile.mode} profEmbs=${profEmbs?.size || 0} embeddingsFailed=${embeddingsFailed} cfAccountId=${!!cfAccountId}`)
         if (profEmbs && profEmbs.size > 0 && !embeddingsFailed) {
-          // Get or compute message embedding
           if (!msgEmbeddingComputed) {
             msgEmbedding = await getEmbedding(text)
             msgEmbeddingComputed = true
+            console.log(`[EMB-DBG] msgEmb=${!!msgEmbedding} text="${text.slice(0,30)}"`)
           }
           if (msgEmbedding) {
             let bestScore = 0
@@ -417,9 +459,12 @@ client.on('update', async (update) => {
                 bestKeyword = kw
               }
             }
+            console.log(`[EMB-DBG] score=${bestScore.toFixed(3)} kw=${bestKeyword} thresh=${profile.threshold}`)
             if (bestScore >= profile.threshold && bestKeyword) {
               matched = bestKeyword + ' (' + bestScore.toFixed(2) + ')'
             }
+          } else {
+            console.log(`[EMB-DBG] getEmbedding returned null!`)
           }
         }
         // Fallback: exact match
@@ -740,8 +785,9 @@ async function pullLoop() {
           try {
             const chat = await client.invoke({ _: 'getChat', chat_id: parseInt(chatId) })
             try { await client.invoke({ _: 'openChat', chat_id: parseInt(chatId) }) } catch {}
+            try { await client.invoke({ _: 'getChatHistory', chat_id: parseInt(chatId), from_message_id: 0, offset: 0, limit: 1, only_local: false }) } catch {}
             monitoredChats.set(chatId, chat.title || name || chatId)
-            console.log('[SYNC+]', chat.title, 'id:', chatId)
+            console.log('[SYNC+]', chat.title, 'id:', chatId, 'type:', chat.type?._)
           } catch {
             monitoredChats.set(chatId, name || chatId)
           }
@@ -757,10 +803,11 @@ async function pullLoop() {
           const chatId = cmd.payload
           try {
             const chat = await client.invoke({ _: 'getChat', chat_id: parseInt(chatId) })
-            // Open chat so TDLib sends us updateNewMessage for it
+            // Open chat + load history so TDLib starts sending updateNewMessage
             try { await client.invoke({ _: 'openChat', chat_id: parseInt(chatId) }) } catch {}
+            try { await client.invoke({ _: 'getChatHistory', chat_id: parseInt(chatId), from_message_id: 0, offset: 0, limit: 1, only_local: false }) } catch {}
             monitoredChats.set(chatId, chat.title || chatId)
-            console.log('[MONITORING]', chat.title)
+            console.log('[MONITORING]', chat.title, 'type:', chat.type?._)
           } catch {
             monitoredChats.set(chatId, chatId)
           }
