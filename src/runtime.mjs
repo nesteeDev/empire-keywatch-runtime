@@ -59,6 +59,7 @@ let haikuKey = ''          // built-in Haiku key from orchestrator
 let haikuRemaining = 0     // checks remaining (daily for premium, lifetime for free)
 let hasOwnKey = false       // user has their own Anthropic key
 let haikuUsedSession = 0   // track usage this session to report back
+let haikuModel = 'claude-haiku-4-5-20251001' // configurable from orchestrator
 
 // --- Per-profile data ---
 let profilesData = []       // from pull: [{id, name, mode, keywords, prompt, threshold, groupIds}]
@@ -345,7 +346,7 @@ async function haikuMatchWithPrompt(text, prompt) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
+        model: haikuModel,
         max_tokens: 5,
         messages: [
           { role: 'user', content: `Does this message match the following criteria? The message can be in ANY language — match by meaning, not language. Answer ONLY "YES" or "NO".\n\nCriteria: ${prompt}\n\nMessage: ${text}` }
@@ -752,6 +753,7 @@ async function pullLoop() {
     if (data.haikuKey !== undefined) haikuKey = data.haikuKey
     if (data.haikuRemaining !== undefined) haikuRemaining = data.haikuRemaining
     if (data.hasOwnKey !== undefined) hasOwnKey = data.hasOwnKey
+    if (data.haikuModel) haikuModel = data.haikuModel
     // Reset session counter on pull (usage already reported per-call)
     haikuUsedSession = 0
     if (data.aiPrompt !== undefined && data.aiPrompt !== promptText) {
