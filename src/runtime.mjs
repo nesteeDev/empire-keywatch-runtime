@@ -377,7 +377,13 @@ client.on('update', async (update) => {
   const text = msg.content.text.text
   const chatId = String(msg.chat_id)
 
-  if (!monitoredChats.has(chatId)) return
+  // Debug: log first message from any chat to see chat_id format
+  if (!monitoredChats.has(chatId)) {
+    if (msg.content?.text?.text?.length > 5) {
+      console.log(`[MSG] chat=${chatId} monitored=${[...monitoredChats.keys()].join(',')} text="${msg.content.text.text.slice(0,30)}"`)
+    }
+    return
+  }
   if (text.length < minMessageLength) return
 
   // --- Per-profile path (new) ---
@@ -733,6 +739,7 @@ async function pullLoop() {
         if (chatId && !monitoredChats.has(chatId)) {
           try {
             const chat = await client.invoke({ _: 'getChat', chat_id: parseInt(chatId) })
+            try { await client.invoke({ _: 'openChat', chat_id: parseInt(chatId) }) } catch {}
             monitoredChats.set(chatId, chat.title || name || chatId)
             console.log('[SYNC+]', chat.title, 'id:', chatId)
           } catch {
@@ -750,6 +757,8 @@ async function pullLoop() {
           const chatId = cmd.payload
           try {
             const chat = await client.invoke({ _: 'getChat', chat_id: parseInt(chatId) })
+            // Open chat so TDLib sends us updateNewMessage for it
+            try { await client.invoke({ _: 'openChat', chat_id: parseInt(chatId) }) } catch {}
             monitoredChats.set(chatId, chat.title || chatId)
             console.log('[MONITORING]', chat.title)
           } catch {
