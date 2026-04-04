@@ -861,6 +861,26 @@ async function pullLoop() {
           console.log('[RESTART] Restart command received')
           process.exit(0) // Railway/systemd will restart
         }
+        if (cmd.command === 'shutdown') {
+          console.log('[SHUTDOWN] Shutdown command received')
+          // Upload session back to pool before exit
+          const sessionDir = path.join(DATA_DIR, 'tdlib_db')
+          const poolUrl = process.env.SESSION_UPLOAD_URL
+          const poolSecret = process.env.SESSION_SECRET
+          if (poolUrl && fs.existsSync(sessionDir)) {
+            try {
+              const { execSync } = await import('child_process')
+              const tarData = execSync(`tar czf - -C "${sessionDir}" .`, { maxBuffer: 50 * 1024 * 1024 })
+              const uploadRes = await fetch(poolUrl, {
+                method: 'POST',
+                headers: { 'Authorization': 'Bearer ' + (poolSecret || ''), 'Content-Type': 'application/gzip' },
+                body: tarData,
+              })
+              console.log('[SHUTDOWN] Session uploaded:', uploadRes.ok)
+            } catch (e) { console.error('[SHUTDOWN] Session upload failed:', e.message) }
+          }
+          process.exit(0)
+        }
       } catch (e) { console.error('[CMD ERROR]', e.message) }
     }
   }
