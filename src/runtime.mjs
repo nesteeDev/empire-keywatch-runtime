@@ -45,7 +45,7 @@ const client = tdl.createClient({
   filesDirectory: DATA + '/tdlib_files',
 })
 
-const RUNTIME_VERSION = '1.3.1'
+const RUNTIME_VERSION = '1.3.2'
 
 let keywords = []
 let monitoredChats = new Map() // chatId -> title
@@ -394,6 +394,32 @@ function getProfilesForChat(chatId) {
   return def ? [def] : []
 }
 
+// --- Message deduplication ---
+const recentMessages = new Map() // "chatId:msgId" -> timestamp
+const DEDUP_TTL = 5 * 60 * 1000  // 5 minutes
+
+function isDuplicate(chatId, msgId) {
+  const key = chatId + ':' + msgId
+  const now = Date.now()
+  // Cleanup old entries every check (cheap — map is small)
+  if (recentMessages.size > 500) {
+    for (const [k, ts] of recentMessages) {
+      if (now - ts > DEDUP_TTL) recentMessages.delete(k)
+    }
+  }
+  if (recentMessages.has(key)) return true
+  recentMessages.set(key, now)
+  return false
+}
+
+// Periodic cleanup
+setInterval(() => {
+  const now = Date.now()
+  for (const [k, ts] of recentMessages) {
+    if (now - ts > DEDUP_TTL) recentMessages.delete(k)
+  }
+}, 60000)
+
 // --- Combined message handler ---
 
 // Temporary: log all update types to debug missing messages
@@ -411,6 +437,12 @@ client.on('update', async (update) => {
   const msg = update.message
   if (!msg || msg.is_outgoing) return
   if (msg.content?._ !== 'messageText') return
+
+  // Deduplication: skip if we already processed this message
+  if (isDuplicate(String(msg.chat_id), msg.id)) {
+    console.log(`[DEDUP] skip chat=${msg.chat_id} msg=${msg.id}`)
+    return
+  }
 
   const text = msg.content.text.text
   const chatId = String(msg.chat_id)
@@ -692,8 +724,8 @@ await syncChatList()
 
 // --- Heartbeat ---
 
-setInterval(() => orchPost('/api/heartbeat', {}), 120000)
-await orchPost('/api/heartbeat', {})
+setInterval(() => orchPost('/api/heartbeat', { version: RUNTIME_VERSION }), 120000)
+await orchPost('/api/heartbeat', { version: RUNTIME_VERSION })
 console.log('[heartbeat] sent')
 
 // --- Pull loop ---
@@ -701,20 +733,22 @@ console.log('[heartbeat] sent')
 async function pullLoop() {
   const data = await orchGet('/api/pull')
   if (data) {
-    // Auto-update: restart if new version available (only for Docker deployments)
-    const isDocker = process.env.RAILWAY_DEPLOYMENT_ID && !process.env.RAILWAY_GIT_COMMIT_SHA
-    if (isDocker && data.runtimeVersion && data.runtimeVersion !== RUNTIME_VERSION) {
-      console.log('[UPDATE] New version available:', data.runtimeVersion, '(current:', RUNTIME_VERSION + ')')
-      console.log('[UPDATE] Restarting to update...')
-      await orchPost('/api/login-status', {
-        status: 'updated',
-        version: data.runtimeVersion,
-        changelog: data.changelog || '',
-      })
-      process.exit(0) // Railway will restart with new Docker image
-    } else if (data.runtimeVersion && data.runtimeVersion !== RUNTIME_VERSION) {
-      // Git deployment — just log, don't restart
-      console.log('[UPDATE] Version mismatch:', data.runtimeVersion, 'vs', RUNTIME_VERSION, '(git deploy, skipping restart)')
+    // Auto-update: only for Contabo pool (pool manager pulls new image on restart)
+    // Railway & self-hosted Docker: restart just uses cached image → infinite loop
+    const isPool = !!process.env.POOL_MODE
+    if (data.runtimeVersion && data.runtimeVersion !== RUNTIME_VERSION) {
+      if (isPool) {
+        console.log('[UPDATE] New version available:', data.runtimeVersion, '(current:', RUNTIME_VERSION + ')')
+        console.log('[UPDATE] Pool mode — restarting to update...')
+        await orchPost('/api/login-status', {
+          status: 'updated',
+          version: data.runtimeVersion,
+          changelog: data.changelog || '',
+        })
+        process.exit(0) // Pool manager will pull new image and restart
+      } else {
+        console.log('[UPDATE] New version available:', data.runtimeVersion, '(current:', RUNTIME_VERSION + '). Not auto-restarting (non-pool deployment).')
+      }
     }
 
     // Sync config
