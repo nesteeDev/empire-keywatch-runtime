@@ -638,18 +638,22 @@ client.on('update', async (update) => {
       // Forward original message to profile destinations
       let forwarded = false
       const destChatIds = profile.destinations || []
+      console.log('[FWD] profile:', profile.name, 'destinations:', JSON.stringify(destChatIds))
       if (destChatIds.length > 0) {
         for (const destId of destChatIds) {
           try {
+            const targetChatId = Number(destId)
+            console.log('[FWD] forwarding msg', msg.id, 'from', msg.chat_id, 'to', targetChatId)
             await client.invoke({
               _: 'forwardMessages',
-              chat_id: parseInt(destId),
+              chat_id: targetChatId,
               from_chat_id: msg.chat_id,
               message_ids: [msg.id],
               send_copy: false,
               remove_caption: false,
             })
             forwarded = true
+            console.log('[FWD] success to', targetChatId)
           } catch (e) {
             console.log('[FWD] fail', destId, e.message)
           }
@@ -989,15 +993,24 @@ async function pullLoop() {
         if (cmd.command === 'send_dm') {
           try {
             const payload = JSON.parse(cmd.payload)
+            const recipientUserId = Number(payload.userId)
+            console.log('[DM] creating private chat with user', recipientUserId)
+            // Must create private chat first to get correct chat_id
+            const chat = await client.invoke({
+              _: 'createPrivateChat',
+              user_id: recipientUserId,
+              force: false,
+            })
+            console.log('[DM] private chat created, chat_id:', chat.id)
             await client.invoke({
               _: 'sendMessage',
-              chat_id: parseInt(payload.userId),
+              chat_id: chat.id,
               input_message_content: {
                 _: 'inputMessageText',
                 text: { _: 'formattedText', text: payload.text },
               },
             })
-            console.log('[DM] sent to', payload.userId)
+            console.log('[DM] sent to user', recipientUserId, 'via chat', chat.id)
           } catch (e) {
             console.error('[DM] failed:', e.message)
             orchPost('/api/dm-status', { status: 'failed', recipientId: JSON.parse(cmd.payload).userId, error: e.message }).catch(() => {})
