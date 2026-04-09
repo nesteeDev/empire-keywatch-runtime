@@ -45,7 +45,7 @@ const client = tdl.createClient({
   filesDirectory: DATA + '/tdlib_files',
 })
 
-const RUNTIME_VERSION = '1.3.2'
+const RUNTIME_VERSION = '1.4.0'
 
 let keywords = []
 let monitoredChats = new Map() // chatId -> title
@@ -321,13 +321,14 @@ function exactKeywordMatch(text) {
 
 // --- Anthropic Haiku (for prompt mode) ---
 
-// Returns: 'AI: prompt match' | 'no' | null (null = error/unavailable)
-async function haikuMatchWithPrompt(text, prompt) {
+// Returns: { match: 'AI: prompt match' | 'no' | null, autoResponse?: string }
+// When autoresponseMode is set, uses combined prompt for check + response in one call
+async function haikuMatchWithPrompt(text, prompt, autoresponseOpts = null) {
   const key = anthropicKey || haikuKey
-  if (!key || !prompt) return null
+  if (!key || !prompt) return { match: null }
   if (!anthropicKey && haikuRemaining <= 0) {
     console.log('[HAIKU] limit reached')
-    return null
+    return { match: null }
   }
 
   // Pre-track usage (before API call to survive crashes)
@@ -336,6 +337,36 @@ async function haikuMatchWithPrompt(text, prompt) {
   }
   haikuUsedSession++
   orchPost('/api/haiku-usage', { count: 1 }).catch(() => {})
+
+  // Build prompt based on whether autoresponse is enabled
+  const wantResponse = autoresponseOpts && autoresponseOpts.mode !== 'off'
+  let userContent, maxTokens
+
+  if (wantResponse) {
+    const templateLine = autoresponseOpts.template
+      ? `\nTone/context: ${autoresponseOpts.template}`
+      : ''
+    userContent = `You are a message relevance analyzer.
+
+Criteria: ${prompt}
+Message: "${text}"
+
+1. Decide if the message is relevant: YES or NO
+2. If YES, write a short DM reply to the message author.
+
+Reply rules:
+- SAME LANGUAGE as the original message
+- Professional, friendly, brief interest — not pushy
+- Follow user's tone guidance if provided${templateLine}
+
+Format:
+MATCH: YES or NO
+RESPONSE: [only if YES — the DM text]`
+    maxTokens = 200
+  } else {
+    userContent = `Does this message match the following criteria? The message can be in ANY language — match by meaning, not language. Answer ONLY "YES" or "NO".\n\nCriteria: ${prompt}\n\nMessage: ${text}`
+    maxTokens = 5
+  }
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -347,10 +378,8 @@ async function haikuMatchWithPrompt(text, prompt) {
       },
       body: JSON.stringify({
         model: haikuModel,
-        max_tokens: 5,
-        messages: [
-          { role: 'user', content: `Does this message match the following criteria? The message can be in ANY language — match by meaning, not language. Answer ONLY "YES" or "NO".\n\nCriteria: ${prompt}\n\nMessage: ${text}` }
-        ],
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content: userContent }],
       }),
     })
 
@@ -363,24 +392,36 @@ async function haikuMatchWithPrompt(text, prompt) {
           anthropicKey = ''
         }
       }
-      return null
+      return { match: null }
     }
 
     const data = await res.json()
-    const answer = data.content?.[0]?.text?.trim().toUpperCase() || ''
-    const isMatch = answer.startsWith('YES')
-    console.log('[HAIKU]', isMatch ? 'MATCH' : 'no match', ':', text.slice(0, 50), '->', answer)
+    const aiText = data.content?.[0]?.text?.trim() || ''
 
-    return isMatch ? 'AI: prompt match' : 'no'
+    if (wantResponse) {
+      // Parse combined response
+      const matchLine = /MATCH:\s*(YES|NO)/i.exec(aiText)
+      const isMatch = matchLine?.[1]?.toUpperCase() === 'YES'
+      const responseLine = /RESPONSE:\s*(.+)/s.exec(aiText)
+      const autoResponse = responseLine?.[1]?.trim() || null
+      console.log('[HAIKU]', isMatch ? 'MATCH' : 'no match', ':', text.slice(0, 50), '-> AR:', autoResponse?.slice(0, 50) || 'none')
+      return { match: isMatch ? 'AI: prompt match' : 'no', autoResponse: isMatch ? autoResponse : null }
+    } else {
+      const answer = aiText.toUpperCase()
+      const isMatch = answer.startsWith('YES')
+      console.log('[HAIKU]', isMatch ? 'MATCH' : 'no match', ':', text.slice(0, 50), '->', answer)
+      return { match: isMatch ? 'AI: prompt match' : 'no' }
+    }
   } catch (e) {
     console.error('[HAIKU] error:', e.message)
-    return null
+    return { match: null }
   }
 }
 
 // Legacy wrapper using global promptText
 async function haikuMatch(text) {
-  return haikuMatchWithPrompt(text, promptText)
+  const result = await haikuMatchWithPrompt(text, promptText)
+  return result.match
 }
 
 // --- Per-profile message handler ---
@@ -436,7 +477,17 @@ client.on('update', async (update) => {
   if (update._ !== 'updateNewMessage') return
   const msg = update.message
   if (!msg || msg.is_outgoing) return
-  if (msg.content?._ !== 'messageText') return
+
+  // Extract text: from messageText or caption of media messages
+  let text = ''
+  const contentType = msg.content?._
+  if (contentType === 'messageText') {
+    text = msg.content.text.text
+  } else if (msg.content?.caption?.text) {
+    // Photo, document, video, voice, audio — have caption
+    text = msg.content.caption.text
+  }
+  if (!text) return
 
   // Deduplication: skip if we already processed this message
   if (isDuplicate(String(msg.chat_id), msg.id)) {
@@ -444,13 +495,12 @@ client.on('update', async (update) => {
     return
   }
 
-  const text = msg.content.text.text
   const chatId = String(msg.chat_id)
 
   // Debug: log first message from any chat to see chat_id format
   if (!monitoredChats.has(chatId)) {
-    if (msg.content?.text?.text?.length > 5) {
-      console.log(`[MSG] chat=${chatId} monitored=${[...monitoredChats.keys()].join(',')} text="${msg.content.text.text.slice(0,30)}"`)
+    if (text.length > 5) {
+      console.log(`[MSG] chat=${chatId} monitored=${[...monitoredChats.keys()].join(',')} text="${text.slice(0,30)}"`)
     }
     return
   }
@@ -507,8 +557,13 @@ client.on('update', async (update) => {
         }
       } else if (profile.mode === 'prompt') {
         // Haiku only — no keywords needed
-        matched = await haikuMatchWithPrompt(text, profile.prompt)
+        const arOpts = (profile.autoresponseMode && profile.autoresponseMode !== 'off')
+          ? { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '' }
+          : null
+        const hResult = await haikuMatchWithPrompt(text, profile.prompt, arOpts)
+        matched = hResult.match
         if (matched === 'no') matched = null
+        if (hResult.autoResponse) profile._autoResponse = hResult.autoResponse
       } else if (profile.mode === 'hybrid') {
         // Keywords first
         const profEmbs = profileEmbeddings.get(profile.id)
@@ -538,16 +593,28 @@ client.on('update', async (update) => {
         }
         // Haiku double-check if keyword matched
         if (matched && profile.prompt) {
-          const haikuResult = await haikuMatchWithPrompt(text, profile.prompt)
-          if (haikuResult === 'no') {
+          const arOpts = (profile.autoresponseMode && profile.autoresponseMode !== 'off')
+            ? { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '' }
+            : null
+          const hResult = await haikuMatchWithPrompt(text, profile.prompt, arOpts)
+          if (hResult.match === 'no') {
             matched = null
-          } else if (haikuResult === null) {
+          } else if (hResult.match === null) {
             console.log('[HYBRID] Haiku unavailable for profile', profile.name, ', passing keyword match through')
           }
+          if (hResult.autoResponse) profile._autoResponse = hResult.autoResponse
         }
       }
 
       if (!matched) continue
+
+      // For keyword-only matches without prompt (no Haiku call yet), generate autoresponse if needed
+      if (!profile._autoResponse && profile.autoresponseMode && profile.autoresponseMode !== 'off') {
+        const arPrompt = profile.prompt || `The user is looking for: ${profile.keywords.join(', ')}`
+        const arOpts = { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '' }
+        const arResult = await haikuMatchWithPrompt(text, arPrompt, arOpts)
+        if (arResult.autoResponse) profile._autoResponse = arResult.autoResponse
+      }
 
       const groupTitle = monitoredChats.get(chatId) || chatId
       console.log('[MATCH]', groupTitle, '| profile:', profile.name, ':', text.slice(0, 80), '| by:', matched)
@@ -568,6 +635,27 @@ client.on('update', async (update) => {
         messageLink = 'https://t.me/c/' + strChatId.slice(4) + '/' + msg.id
       }
 
+      // Forward original message to profile destinations
+      let forwarded = false
+      const destChatIds = profile.destinations || []
+      if (destChatIds.length > 0) {
+        for (const destId of destChatIds) {
+          try {
+            await client.invoke({
+              _: 'forwardMessages',
+              chat_id: parseInt(destId),
+              from_chat_id: msg.chat_id,
+              message_ids: [msg.id],
+              send_copy: false,
+              remove_caption: false,
+            })
+            forwarded = true
+          } catch (e) {
+            console.log('[FWD] fail', destId, e.message)
+          }
+        }
+      }
+
       await orchPost('/api/candidate', {
         text,
         groupUsername: groupTitle,
@@ -579,7 +667,12 @@ client.on('update', async (update) => {
         senderName,
         senderUsername,
         senderId,
+        forwarded,
+        autoResponse: profile._autoResponse || undefined,
+        autoresponseMode: profile.autoresponseMode || 'off',
       })
+      // Clean up temp field
+      delete profile._autoResponse
     }
     return
   }
@@ -892,6 +985,23 @@ async function pullLoop() {
         }
         if (cmd.command === 'list_chats') {
           await syncChatList()
+        }
+        if (cmd.command === 'send_dm') {
+          try {
+            const payload = JSON.parse(cmd.payload)
+            await client.invoke({
+              _: 'sendMessage',
+              chat_id: parseInt(payload.userId),
+              input_message_content: {
+                _: 'inputMessageText',
+                text: { _: 'formattedText', text: payload.text },
+              },
+            })
+            console.log('[DM] sent to', payload.userId)
+          } catch (e) {
+            console.error('[DM] failed:', e.message)
+            orchPost('/api/dm-status', { status: 'failed', recipientId: JSON.parse(cmd.payload).userId, error: e.message }).catch(() => {})
+          }
         }
         if (cmd.command === 'restart') {
           console.log('[RESTART] Restart command received')
