@@ -355,13 +355,16 @@ Message: "${text}"
 2. If YES, write a short DM reply to the message author.
 
 Reply rules:
-- SAME LANGUAGE as the original message
-- Professional, friendly, brief interest — not pushy
-- Follow user's tone guidance if provided${templateLine}
+- Write in the SAME LANGUAGE as the original message
+- Write like a real person, not a corporate bot or AI assistant
+- Be brief and natural: "Привет, могу помочь с X" or "Hi, I can help with X — what exactly do you need?"
+- Ask a clarifying question to start a conversation
+- NO emojis, NO exclamation marks, NO filler phrases like "Отлично!", "Great!", "I'd be happy to"
+- Sound like a casual DM from a real human${templateLine}
 
 Format:
 MATCH: YES or NO
-RESPONSE: [only if YES — the DM text]`
+RESPONSE: [only if YES — the DM text, 1-2 sentences max]`
     maxTokens = 200
   } else {
     userContent = `Does this message match the following criteria? The message can be in ANY language — match by meaning, not language. Answer ONLY "YES" or "NO".\n\nCriteria: ${prompt}\n\nMessage: ${text}`
