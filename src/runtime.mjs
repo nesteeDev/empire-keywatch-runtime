@@ -3,6 +3,15 @@ import tdl from 'tdl'
 import prebuilt from 'prebuilt-tdlib'
 import fs from 'fs'
 import path from 'path'
+import {
+  initArAccount,
+  submitArCode,
+  submitArPassword,
+  closeArAccount,
+  sendDmViaArClient,
+  restoreArClients,
+  getArClientStatus,
+} from './ar-clients.mjs'
 
 tdl.configure({ tdjson: prebuilt.getTdjson() })
 
@@ -1031,25 +1040,83 @@ async function pullLoop() {
               console.log(`[DM] waiting ${delaySec}s before sending to user ${recipientUserId}`)
               await new Promise(r => setTimeout(r, delaySec * 1000))
             }
-            console.log('[DM] creating private chat with user', recipientUserId)
-            const chat = await client.invoke({
-              _: 'createPrivateChat',
-              user_id: recipientUserId,
-              force: false,
-            })
-            console.log('[DM] private chat created, chat_id:', chat.id)
-            await client.invoke({
-              _: 'sendMessage',
-              chat_id: chat.id,
-              input_message_content: {
-                _: 'inputMessageText',
-                text: { _: 'formattedText', text: payload.text },
-              },
-            })
-            console.log('[DM] sent to user', recipientUserId, 'via chat', chat.id)
+            // NEW: route via linked AR client if profile has one ready
+            if (payload.arProfileId) {
+              const arStatus = getArClientStatus(payload.arProfileId)
+              if (arStatus.status === 'ready') {
+                console.log(`[DM] via AR profile ${payload.arProfileId} → user ${recipientUserId}`)
+                await sendDmViaArClient(payload.arProfileId, recipientUserId, payload.text)
+                console.log(`[DM] AR send ok (profile ${payload.arProfileId})`)
+              } else {
+                throw new Error(`AR client for profile ${payload.arProfileId} not ready (status=${arStatus.status})`)
+              }
+            } else {
+              // Default path: send from main user client
+              console.log('[DM] creating private chat with user', recipientUserId)
+              const chat = await client.invoke({
+                _: 'createPrivateChat',
+                user_id: recipientUserId,
+                force: false,
+              })
+              console.log('[DM] private chat created, chat_id:', chat.id)
+              await client.invoke({
+                _: 'sendMessage',
+                chat_id: chat.id,
+                input_message_content: {
+                  _: 'inputMessageText',
+                  text: { _: 'formattedText', text: payload.text },
+                },
+              })
+              console.log('[DM] sent to user', recipientUserId, 'via chat', chat.id)
+            }
           } catch (e) {
             console.error('[DM] failed:', e.message)
             orchPost('/api/dm-status', { status: 'failed', recipientId: JSON.parse(cmd.payload).userId, error: e.message }).catch(() => {})
+          }
+        }
+        // AR account linking commands
+        if (cmd.command === 'ar_account_init') {
+          try {
+            const { profileId, phone } = JSON.parse(cmd.payload)
+            console.log(`[AR] init profile=${profileId}`)
+            const report = (status, error) => {
+              orchPost('/api/ar-account/status', { profileId, status, error: error || null }).catch(() => {})
+            }
+            await initArAccount(profileId, phone, report)
+          } catch (e) {
+            console.error('[AR] init failed:', e.message)
+            try {
+              const { profileId } = JSON.parse(cmd.payload)
+              orchPost('/api/ar-account/status', { profileId, status: 'error', error: e.message }).catch(() => {})
+            } catch {}
+          }
+        }
+        if (cmd.command === 'ar_account_code') {
+          try {
+            const { profileId, code } = JSON.parse(cmd.payload)
+            console.log(`[AR] submit code profile=${profileId}`)
+            await submitArCode(profileId, code)
+          } catch (e) {
+            console.error('[AR] submitCode failed:', e.message)
+          }
+        }
+        if (cmd.command === 'ar_account_password') {
+          try {
+            const { profileId, password } = JSON.parse(cmd.payload)
+            console.log(`[AR] submit password profile=${profileId}`)
+            await submitArPassword(profileId, password)
+          } catch (e) {
+            console.error('[AR] submitPassword failed:', e.message)
+          }
+        }
+        if (cmd.command === 'ar_account_close') {
+          try {
+            const { profileId } = JSON.parse(cmd.payload)
+            console.log(`[AR] close profile=${profileId}`)
+            await closeArAccount(profileId)
+            orchPost('/api/ar-account/status', { profileId, status: 'none', error: null }).catch(() => {})
+          } catch (e) {
+            console.error('[AR] close failed:', e.message)
           }
         }
         if (cmd.command === 'restart') {
@@ -1088,6 +1155,15 @@ if (profilesData.length > 0) {
   await updateProfileEmbeddings()
 } else {
   await updateKeywordEmbeddings()
+}
+
+// Restore any linked AR accounts from disk (session files persist across restarts)
+try {
+  const arReport = (profileId, status, error) =>
+    orchPost('/api/ar-account/status', { profileId, status, error: error || null }).catch(() => {})
+  await restoreArClients(arReport)
+} catch (e) {
+  console.error('[AR] restore failed:', e.message)
 }
 
 console.log('Runtime ready. Pull loop starting...')
