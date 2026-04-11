@@ -346,21 +346,32 @@ async function haikuMatchWithPrompt(text, prompt, autoresponseOpts = null) {
     const templateLine = autoresponseOpts.template
       ? `\nTone/context: ${autoresponseOpts.template}`
       : ''
-    userContent = `You are a message relevance analyzer.
-
-Criteria: ${prompt}
-Message: "${text}"
-
-1. Decide if the message is relevant: YES or NO
-2. If YES, write a short DM reply to the message author.
-
-Reply rules:
+    const isReferral = autoresponseOpts.strategy === 'referral' && autoresponseOpts.referral
+    const replyRules = isReferral
+      ? `Reply rules:
+- Write in the SAME LANGUAGE as the original message
+- Recommend @${autoresponseOpts.referral} as someone who can help with this topic
+- Use a polite, slightly formal greeting: "Здравствуйте, по этой теме может помочь @user" / "Доброго дня, з цього питання може допомогти @user" / "Hello, @user can help with this topic"
+- Sound like a real human writing a polite DM, not a bot
+- NEVER start with "Привет" — use "Здравствуйте" / "Доброго дня" / "Добрий день" / "Hello" / "Good day" instead
+- NO emojis, NO exclamation marks, NO filler phrases${templateLine}`
+      : `Reply rules:
 - Write in the SAME LANGUAGE as the original message
 - Write like a real person, not a corporate bot or AI assistant
-- Be brief and natural: "Привет, могу помочь с X" or "Hi, I can help with X — what exactly do you need?"
+- Use a polite, slightly formal greeting: "Здравствуйте, могу помочь с X" / "Доброго дня, можу допомогти з X" / "Hello, I can help with X"
+- NEVER start with "Привет" — use "Здравствуйте" / "Доброго дня" / "Добрий день" / "Hello" / "Good day" instead
 - Ask a clarifying question to start a conversation
 - NO emojis, NO exclamation marks, NO filler phrases like "Отлично!", "Great!", "I'd be happy to"
-- Sound like a casual DM from a real human${templateLine}
+- Sound like a polite, real human${templateLine}`
+    userContent = `Does this message match the following criteria? The message can be in ANY language — match by meaning, not language.
+
+Criteria: ${prompt}
+
+Message: ${text}
+
+Answer YES or NO. If YES, also write a short DM reply to the message author.
+
+${replyRules}
 
 Format:
 MATCH: YES or NO
@@ -402,9 +413,11 @@ RESPONSE: [only if YES — the DM text, 1-2 sentences max]`
     const aiText = data.content?.[0]?.text?.trim() || ''
 
     if (wantResponse) {
-      // Parse combined response
+      // Parse combined response (with fallback to simple YES check)
       const matchLine = /MATCH:\s*(YES|NO)/i.exec(aiText)
-      const isMatch = matchLine?.[1]?.toUpperCase() === 'YES'
+      const isMatch = matchLine
+        ? matchLine[1].toUpperCase() === 'YES'
+        : aiText.toUpperCase().startsWith('YES') // fallback if AI skips MATCH: prefix
       const responseLine = /RESPONSE:\s*(.+)/s.exec(aiText)
       const autoResponse = responseLine?.[1]?.trim() || null
       console.log('[HAIKU]', isMatch ? 'MATCH' : 'no match', ':', text.slice(0, 50), '-> AR:', autoResponse?.slice(0, 50) || 'none')
@@ -561,7 +574,7 @@ client.on('update', async (update) => {
       } else if (profile.mode === 'prompt') {
         // Haiku only — no keywords needed
         const arOpts = (profile.autoresponseMode && profile.autoresponseMode !== 'off')
-          ? { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '' }
+          ? { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '', strategy: profile.autoresponseStrategy || 'direct', referral: profile.autoresponseReferral || '' }
           : null
         const hResult = await haikuMatchWithPrompt(text, profile.prompt, arOpts)
         matched = hResult.match
@@ -570,6 +583,7 @@ client.on('update', async (update) => {
       } else if (profile.mode === 'hybrid') {
         // Keywords first
         const profEmbs = profileEmbeddings.get(profile.id)
+        console.log(`[EMB-DBG] profile=${profile.name} mode=${profile.mode} profEmbs=${profEmbs?.size || 0} embeddingsFailed=${embeddingsFailed} cfAccountId=${!!cfAccountId}`)
         if (profEmbs && profEmbs.size > 0 && !embeddingsFailed) {
           if (!msgEmbeddingComputed) {
             msgEmbedding = await getEmbedding(text)
@@ -585,6 +599,7 @@ client.on('update', async (update) => {
                 bestKeyword = kw
               }
             }
+            console.log(`[EMB-DBG] score=${bestScore.toFixed(3)} kw=${bestKeyword} thresh=${profile.threshold}`)
             if (bestScore >= profile.threshold && bestKeyword) {
               matched = bestKeyword + ' (' + bestScore.toFixed(2) + ')'
             }
@@ -597,7 +612,7 @@ client.on('update', async (update) => {
         // Haiku double-check if keyword matched
         if (matched && profile.prompt) {
           const arOpts = (profile.autoresponseMode && profile.autoresponseMode !== 'off')
-            ? { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '' }
+            ? { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '', strategy: profile.autoresponseStrategy || 'direct', referral: profile.autoresponseReferral || '' }
             : null
           const hResult = await haikuMatchWithPrompt(text, profile.prompt, arOpts)
           if (hResult.match === 'no') {
@@ -611,11 +626,11 @@ client.on('update', async (update) => {
 
       if (!matched) continue
 
-      // For keyword-only matches without prompt (no Haiku call yet), generate autoresponse if needed
-      if (!profile._autoResponse && profile.autoresponseMode && profile.autoresponseMode !== 'off') {
-        const arPrompt = profile.prompt || `The user is looking for: ${profile.keywords.join(', ')}`
-        const arOpts = { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '' }
-        const arResult = await haikuMatchWithPrompt(text, arPrompt, arOpts)
+      // Generate autoresponse via Haiku ONLY if profile has a real prompt.
+      // Pure keywords mode → no autoresponse (Haiku has no context to generate a sensible reply).
+      if (!profile._autoResponse && profile.autoresponseMode && profile.autoresponseMode !== 'off' && profile.prompt) {
+        const arOpts = { mode: profile.autoresponseMode, template: profile.autoresponseTemplate || '', strategy: profile.autoresponseStrategy || 'direct', referral: profile.autoresponseReferral || '' }
+        const arResult = await haikuMatchWithPrompt(text, profile.prompt, arOpts)
         if (arResult.autoResponse) profile._autoResponse = arResult.autoResponse
       }
 
@@ -646,6 +661,18 @@ client.on('update', async (update) => {
         for (const destId of destChatIds) {
           try {
             const targetChatId = Number(destId)
+            // Ensure TDLib has loaded the destination chat
+            try {
+              if (targetChatId > 0) {
+                await client.invoke({ _: 'createPrivateChat', user_id: targetChatId, force: false })
+              } else if (targetChatId > -1000000000000) {
+                await client.invoke({ _: 'createBasicGroupChat', basic_group_id: Math.abs(targetChatId), force: false })
+              } else {
+                await client.invoke({ _: 'createSupergroupChat', supergroup_id: Math.abs(targetChatId) - 1000000000000, force: false })
+              }
+            } catch (loadErr) {
+              console.log('[FWD] chat load attempt for', targetChatId, ':', loadErr.message)
+            }
             console.log('[FWD] forwarding msg', msg.id, 'from', msg.chat_id, 'to', targetChatId)
             await client.invoke({
               _: 'forwardMessages',
@@ -997,8 +1024,13 @@ async function pullLoop() {
           try {
             const payload = JSON.parse(cmd.payload)
             const recipientUserId = Number(payload.userId)
+            // Random delay 30-90s to look natural
+            if (payload.delay) {
+              const delaySec = 30 + Math.floor(Math.random() * 61)
+              console.log(`[DM] waiting ${delaySec}s before sending to user ${recipientUserId}`)
+              await new Promise(r => setTimeout(r, delaySec * 1000))
+            }
             console.log('[DM] creating private chat with user', recipientUserId)
-            // Must create private chat first to get correct chat_id
             const chat = await client.invoke({
               _: 'createPrivateChat',
               user_id: recipientUserId,
