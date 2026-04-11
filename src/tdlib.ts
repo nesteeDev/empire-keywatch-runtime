@@ -6,8 +6,11 @@ import { keywordMatch } from "./matcher";
 import { sendAlert, sendLoginStatus } from "./alert";
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "..", "data");
-const TG_API_ID = parseInt(process.env.TG_API_ID || "30388596");
-const TG_API_HASH = process.env.TG_API_HASH || "a6f9e33394ef9a6f42ed086f205e7b8e";
+if (!process.env.TG_API_ID || !process.env.TG_API_HASH) {
+  throw new Error("TG_API_ID and TG_API_HASH must be set in env");
+}
+const TG_API_ID = parseInt(process.env.TG_API_ID);
+const TG_API_HASH = process.env.TG_API_HASH;
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
