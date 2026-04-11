@@ -395,6 +395,7 @@ RESPONSE: [only if YES — the DM text, 1-2 sentences max]`
         max_tokens: maxTokens,
         messages: [{ role: 'user', content: userContent }],
       }),
+      signal: AbortSignal.timeout(15000), // 15s max — don't stall runtime on slow/hanging API
     })
 
     if (!res.ok) {
