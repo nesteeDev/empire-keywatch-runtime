@@ -1041,14 +1041,14 @@ async function pullLoop() {
               await new Promise(r => setTimeout(r, delaySec * 1000))
             }
             // NEW: route via linked AR client if profile has one ready
-            if (payload.arProfileId) {
-              const arStatus = getArClientStatus(payload.arProfileId)
+            if (payload.arAccountId) {
+              const arStatus = getArClientStatus(payload.arAccountId)
               if (arStatus.status === 'ready') {
-                console.log(`[DM] via AR profile ${payload.arProfileId} → user ${recipientUserId}`)
-                await sendDmViaArClient(payload.arProfileId, recipientUserId, payload.text)
-                console.log(`[DM] AR send ok (profile ${payload.arProfileId})`)
+                console.log(`[DM] via AR account ${payload.arAccountId} → user ${recipientUserId}`)
+                await sendDmViaArClient(payload.arAccountId, recipientUserId, payload.text)
+                console.log(`[DM] AR send ok (profile ${payload.arAccountId})`)
               } else {
-                throw new Error(`AR client for profile ${payload.arProfileId} not ready (status=${arStatus.status})`)
+                throw new Error(`AR client for profile ${payload.arAccountId} not ready (status=${arStatus.status})`)
               }
             } else {
               // Default path: send from main user client
@@ -1077,44 +1077,44 @@ async function pullLoop() {
         // AR account linking commands
         if (cmd.command === 'ar_account_init') {
           try {
-            const { profileId, phone } = JSON.parse(cmd.payload)
+            const { accountId, phone } = JSON.parse(cmd.payload)
             console.log(`[AR] init profile=${profileId}`)
             const report = (status, error) => {
-              orchPost('/api/ar-account/status', { profileId, status, error: error || null }).catch(() => {})
+              orchPost('/api/ar-account/status', { accountId, status, error: error || null }).catch(() => {})
             }
-            await initArAccount(profileId, phone, report)
+            await initArAccount(accountId, phone, report)
           } catch (e) {
             console.error('[AR] init failed:', e.message)
             try {
-              const { profileId } = JSON.parse(cmd.payload)
-              orchPost('/api/ar-account/status', { profileId, status: 'error', error: e.message }).catch(() => {})
+              const { accountId } = JSON.parse(cmd.payload)
+              orchPost('/api/ar-account/status', { accountId, status: 'error', error: e.message }).catch(() => {})
             } catch {}
           }
         }
         if (cmd.command === 'ar_account_code') {
           try {
-            const { profileId, code } = JSON.parse(cmd.payload)
+            const { accountId, code } = JSON.parse(cmd.payload)
             console.log(`[AR] submit code profile=${profileId}`)
-            await submitArCode(profileId, code)
+            await submitArCode(accountId, code)
           } catch (e) {
             console.error('[AR] submitCode failed:', e.message)
           }
         }
         if (cmd.command === 'ar_account_password') {
           try {
-            const { profileId, password } = JSON.parse(cmd.payload)
+            const { accountId, password } = JSON.parse(cmd.payload)
             console.log(`[AR] submit password profile=${profileId}`)
-            await submitArPassword(profileId, password)
+            await submitArPassword(accountId, password)
           } catch (e) {
             console.error('[AR] submitPassword failed:', e.message)
           }
         }
         if (cmd.command === 'ar_account_close') {
           try {
-            const { profileId } = JSON.parse(cmd.payload)
+            const { accountId } = JSON.parse(cmd.payload)
             console.log(`[AR] close profile=${profileId}`)
-            await closeArAccount(profileId)
-            orchPost('/api/ar-account/status', { profileId, status: 'none', error: null }).catch(() => {})
+            await closeArAccount(accountId)
+            orchPost('/api/ar-account/status', { accountId, status: 'none', error: null }).catch(() => {})
           } catch (e) {
             console.error('[AR] close failed:', e.message)
           }
@@ -1160,7 +1160,7 @@ if (profilesData.length > 0) {
 // Restore any linked AR accounts from disk (session files persist across restarts)
 try {
   const arReport = (profileId, status, error) =>
-    orchPost('/api/ar-account/status', { profileId, status, error: error || null }).catch(() => {})
+    orchPost('/api/ar-account/status', { accountId, status, error: error || null }).catch(() => {})
   await restoreArClients(arReport)
 } catch (e) {
   console.error('[AR] restore failed:', e.message)
