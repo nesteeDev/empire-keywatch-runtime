@@ -1078,7 +1078,7 @@ async function pullLoop() {
         if (cmd.command === 'ar_account_init') {
           try {
             const { accountId, phone } = JSON.parse(cmd.payload)
-            console.log(`[AR] init profile=${profileId}`)
+            console.log(`[AR] init account=${accountId}`)
             const report = (status, error) => {
               orchPost('/api/ar-account/status', { accountId, status, error: error || null }).catch(() => {})
             }
@@ -1094,7 +1094,7 @@ async function pullLoop() {
         if (cmd.command === 'ar_account_code') {
           try {
             const { accountId, code } = JSON.parse(cmd.payload)
-            console.log(`[AR] submit code profile=${profileId}`)
+            console.log(`[AR] submit code account=${accountId}`)
             await submitArCode(accountId, code)
           } catch (e) {
             console.error('[AR] submitCode failed:', e.message)
@@ -1103,7 +1103,7 @@ async function pullLoop() {
         if (cmd.command === 'ar_account_password') {
           try {
             const { accountId, password } = JSON.parse(cmd.payload)
-            console.log(`[AR] submit password profile=${profileId}`)
+            console.log(`[AR] submit password account=${accountId}`)
             await submitArPassword(accountId, password)
           } catch (e) {
             console.error('[AR] submitPassword failed:', e.message)
@@ -1112,7 +1112,7 @@ async function pullLoop() {
         if (cmd.command === 'ar_account_close') {
           try {
             const { accountId } = JSON.parse(cmd.payload)
-            console.log(`[AR] close profile=${profileId}`)
+            console.log(`[AR] close account=${accountId}`)
             await closeArAccount(accountId)
             orchPost('/api/ar-account/status', { accountId, status: 'none', error: null }).catch(() => {})
           } catch (e) {
@@ -1159,7 +1159,7 @@ if (profilesData.length > 0) {
 
 // Restore any linked AR accounts from disk (session files persist across restarts)
 try {
-  const arReport = (profileId, status, error) =>
+  const arReport = (acctId, status, error) =>
     orchPost('/api/ar-account/status', { accountId, status, error: error || null }).catch(() => {})
   await restoreArClients(arReport)
 } catch (e) {
